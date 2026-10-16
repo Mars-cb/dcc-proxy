@@ -31,7 +31,7 @@ sudo dpkg -i dist/dcc-proxy_0.1.4_$(dpkg --print-architecture).deb
 内核和数据下载仅发生于构建缓存缺失时；deb 安装和首次启动不执行依赖下载。
 默认最多使用 2 个编译任务，`DCC_PROXY_JOBS` 可调整。
 
-脚本根据**构建机器**的架构自动选择官方 Mihomo v1.19.12 内核，只打包对应架构。
+脚本根据**构建机器**的架构自动选择官方 Mihomo v1.19.16 内核，只打包对应架构。
 内核是官方预编译二进制；插件与后台管理程序在本机编译。下载缓存保存在 `cores/`，
 构建和打包不自动执行 apt 安装。`--without-core` 可生成使用现有内核的包。
 跨架构构建需要对应工具链和 Qt sysroot，也可直接在目标架构机器执行脚本。
@@ -171,5 +171,5 @@ systemctl --user status dde-mihomo-daemon.service
 的 4:3 SVG 资源（提交 `086f7e97d657358203916dbe84f61c2bccaa81eb`，MIT），保留其许可证。
 功能参考 [Clash Party v2.0.3](https://github.com/mihomo-party-org/clash-party/tree/v2.0.3)，
 API 依据 [Mihomo 官方文档](https://wiki.metacubex.one/api/)，未复制上游应用代码。
-随包内核来自 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.12)，
+随包内核来自 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.16)，
 其 GPL 许可证与对应源码归档安装在 `/usr/share/doc/dcc-proxy/`。

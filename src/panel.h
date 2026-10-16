@@ -17,6 +17,7 @@ class QTabWidget;
 class QSpinBox;
 class QCheckBox;
 class QPushButton;
+class QVBoxLayout;
 class QAbstractButton;
 
 namespace Party {
@@ -38,9 +39,17 @@ private:
     void setTunOptions(const QJsonObject &options);
     void updateSwitches(const QJsonObject &state);
     QWidget *proxiesPage();
+    QWidget *groupsPage();
+    void renderGroups();
+    void renderNodeList(NodeList *list, const QString &group);
+    void chooseNode(const QString &group, const QString &name);
     QWidget *profilesPage();
     QWidget *connectionsPage();
     QWidget *rulesPage();
+    QString websiteRuleProfile() const;
+    QString websiteRulePolicy() const;
+    void updateWebsiteRule();
+    void addWebsiteRule();
     QWidget *providersPage();
     QWidget *overridePage();
     QWidget *settingsPage();
@@ -53,7 +62,7 @@ private:
     void updateProxyGroups();
     void renderNodes();
     void selectNode();
-    void testNodes(bool group, const QString &node = {});
+    void testNodes(bool group, const QString &node = {}, const QString &policy = {});
     void runNodeTests();
     void reloadProfiles();
     void editProfile(bool create);
@@ -103,6 +112,13 @@ private:
     QComboBox *m_mode;
     QComboBox *m_group;
     QComboBox *m_nodeSource;
+    QComboBox *m_groupsSource;
+    QLabel *m_groupsHint;
+    QVBoxLayout *m_groupsLayout = nullptr;
+    struct GroupCard { QWidget *frame; QPushButton *header; QLabel *route; QPushButton *test; QPushButton *automatic; NodeList *nodes; };
+    QMap<QString, GroupCard> m_groupCards;
+    QStringList m_groupOrder;
+    QString m_groupScope;
     QLabel *m_nodeHint;
     QPushButton *m_restoreAutomatic;
     bool m_previewing = false;
@@ -123,6 +139,9 @@ private:
     QLineEdit *m_connectionSearch;
     QTableWidget *m_rules;
     QLineEdit *m_ruleSearch;
+    QLineEdit *m_website = nullptr;
+    QLabel *m_websitePreview = nullptr;
+    QPushButton *m_addWebsiteRule = nullptr;
     QTableWidget *m_providers;
     QPlainTextEdit *m_logs;
     QLabel *m_logStatus;

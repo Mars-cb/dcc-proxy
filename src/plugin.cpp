@@ -34,7 +34,7 @@ void ProxyPlugin::addChildPageTrans() const
 {
     if (!m_frameProxy) return;
     m_frameProxy->addChildPageTrans("Overview", tr("概览"));
-    m_frameProxy->addChildPageTrans("Proxies", tr("节点"));
+    m_frameProxy->addChildPageTrans("Proxies", tr("代理组"));
     m_frameProxy->addChildPageTrans("Profiles", tr("订阅"));
     m_frameProxy->addChildPageTrans("Connections", tr("连接"));
     m_frameProxy->addChildPageTrans("Rules", tr("规则"));
@@ -48,7 +48,7 @@ void ProxyPlugin::addChildPageTrans() const
 void ProxyPlugin::initSearchData()
 {
     if (!m_frameProxy) return;
-    for (const auto &page : {tr("概览"), tr("节点"), tr("订阅"), tr("连接"), tr("规则"), tr("资源"), tr("日志"), tr("覆写"), tr("工具"), tr("设置"), tr("虚拟网卡")})
+    for (const auto &page : {tr("概览"), tr("代理组"), tr("订阅"), tr("连接"), tr("规则"), tr("资源"), tr("日志"), tr("覆写"), tr("工具"), tr("设置"), tr("虚拟网卡")})
         m_frameProxy->setWidgetVisible(displayName(), page, true);
     m_frameProxy->updateSearchData(displayName());
 }

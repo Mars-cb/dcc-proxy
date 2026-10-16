@@ -1,3 +1,14 @@
+dcc-proxy (0.1.7) unstable; urgency=medium
+
+  * Display subscription policy groups as collapsible native node grids.
+  * Show routing chains from the matched policy to the actual outbound node.
+  * Add website rules with automatic domain/IP parsing and current policy.
+  * Validate override conflicts and preserve the previous profile on failure.
+  * Align the bundled official Mihomo core with Clash Party v1.19.16.
+  * Refresh mismatched core caches safely and build with 12 jobs by default.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Fri, 16 Oct 2026 18:30:00 +0800
+
 dcc-proxy (0.1.6) unstable; urgency=medium
 
   * Set the default controller port to 19999 and mixed proxy port to 16666.

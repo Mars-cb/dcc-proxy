@@ -4,7 +4,7 @@ include /usr/share/dpkg/default.mk
 export QT_SELECT = qt5
 export QT_QPA_PLATFORM = offscreen
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
-DCC_PROXY_JOBS ?= 2
+DCC_PROXY_JOBS ?= 12
 DCC_PROXY_BUNDLE_CORE ?= 1
 DCC_PROXY_BUNDLE_GEODATA ?= 1
 CORE_VERSION := $(shell cat packaging/mihomo.version)

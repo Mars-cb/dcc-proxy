@@ -82,6 +82,16 @@ protected:
         addPendingConnection(socket); socket->startServerEncryption();
     }
 };
+static NodeList *policyNodes(Panel &panel, const QString &name)
+{
+    for (auto *list : panel.findChildren<NodeList *>("policy-group-nodes")) if (list->property("proxyGroup").toString() == name) return list;
+    return nullptr;
+}
+static QPushButton *policyButton(Panel &panel, const QString &object, const QString &name)
+{
+    for (auto *button : panel.findChildren<QPushButton *>(object)) if (button->property("proxyGroup").toString() == name) return button;
+    return nullptr;
+}
 class PartyTests : public QObject {
     Q_OBJECT
 private slots:
@@ -662,6 +672,99 @@ private slots:
         QCOMPARE(b["proxy-groups"].size(), size_t(2));
         QVERIFY_EXCEPTION_THROWN(normalizeSubscription("<html>not a subscription</html>"), std::runtime_error);
     }
+    void groupRoutesAndWebsiteRules()
+    {
+        const QJsonObject proxies{{"GLOBAL", QJsonObject{{"all", QJsonArray{"AI", "主选择", "隐藏"}}, {"hidden", true}}},
+            {"AI", QJsonObject{{"all", QJsonArray{"主选择", "日本03"}}, {"now", "主选择"}, {"type", "Selector"}}},
+            {"主选择", QJsonObject{{"all", QJsonArray{"日本03"}}, {"now", "日本03"}, {"type", "Selector"}}},
+            {"日本03", QJsonObject{{"type", "Hysteria2"}}}, {"隐藏", QJsonObject{{"all", QJsonArray{"DIRECT"}}, {"hidden", true}}}};
+        QCOMPARE(proxyGroupNames(proxies), QStringList({"AI", "主选择"}));
+        QCOMPARE(proxyGroupRoute(proxies, "AI"), QString("AI → 主选择 → 日本03"));
+        auto cycle = proxies; auto group = cycle["主选择"].toObject(); group["now"] = "AI"; cycle["主选择"] = group;
+        QVERIFY(proxyGroupRoute(cycle, "AI").endsWith("循环引用"));
+        group["type"] = "LoadBalance"; cycle["主选择"] = group; QVERIFY(proxyGroupRoute(cycle, "主选择").contains("负载均衡"));
+        QCOMPARE(websiteRule("https://Example.COM/path?q=1#x", "AI"), QString("DOMAIN-SUFFIX,example.com,AI"));
+        QCOMPARE(websiteRule("*.example.com", "主选择"), QString("DOMAIN-SUFFIX,example.com,主选择"));
+        QCOMPARE(websiteRule("http://192.0.2.1:8080/p", "DIRECT"), QString("IP-CIDR,192.0.2.1/32,DIRECT,no-resolve"));
+        QCOMPARE(websiteRule("https://[2001:db8::1]/", "AI"), QString("IP-CIDR6,2001:db8::1/128,AI,no-resolve"));
+        QVERIFY(websiteRule("https://例子.测试/path", "AI").startsWith("DOMAIN-SUFFIX,xn--"));
+        for (const auto &invalid : {"", "a,b,DIRECT", "ftp://example.com", "https://user:password@example.com", "https://*.example.com", "-bad.example"})
+            QVERIFY_EXCEPTION_THROWN(websiteRule(invalid, "AI"), std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(websiteRule("example.com", "bad,policy"), std::runtime_error);
+        const auto yaml = prependWebsiteRule("proxy-groups: [{name: AI, type: select, proxies: [DIRECT]}]\nrules: [\"DOMAIN-SUFFIX,example.com,DIRECT\", \"DOMAIN-SUFFIX,other.com,DIRECT\", \"MATCH,AI\"]\n", websiteRule("example.com", "AI"));
+        const auto config = parseConfig(yaml); QCOMPARE(config["rules"].size(), size_t(3));
+        QCOMPARE(QString::fromStdString(config["rules"][0].as<std::string>()), QString("DOMAIN-SUFFIX,example.com,AI"));
+        QCOMPARE(QString::fromStdString(config["rules"][2].as<std::string>()), QString("MATCH,AI"));
+        QVERIFY(subscriptionNodes("proxy-groups: [{name: 隐藏, type: select, hidden: true, proxies: [DIRECT]}]\n").proxies["隐藏"].toObject()["hidden"].toBool());
+    }
+    void websiteRuleFormAndOverrideRollback()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        {
+            Store store; const auto id = store.saveProfile("网址测试", {}, "proxy-groups: [{name: 主选择, type: select, proxies: [DIRECT]}]\nrules: [\"MATCH,主选择\"]\n");
+            QTcpServer probe; QVERIFY(probe.listen(QHostAddress::LocalHost));
+            auto settings = store.settings(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(probe.serverPort()); probe.close(); store.setSettings(settings);
+            Panel panel; panel.resize(650, 700); panel.show(); panel.openPage("Rules");
+            auto *url = panel.findChild<QLineEdit *>("website-rule-url"); auto *add = panel.findChild<QPushButton *>("add-website-rule");
+            auto *preview = panel.findChild<QLabel *>("website-rule-preview"); QVERIFY(url); QVERIFY(add); QVERIFY(preview);
+            url->setText("https://example.com/path"); QVERIFY(add->isEnabled()); QVERIFY(preview->text().contains("DOMAIN-SUFFIX,example.com,主选择"));
+            QTest::mouseClick(add, Qt::LeftButton);
+            QCOMPARE(QString::fromStdString(parseConfig(store.profile(id))["rules"][0].as<std::string>()), QString("DOMAIN-SUFFIX,example.com,主选择"));
+            QVERIFY(url->text().isEmpty()); QVERIFY(!QFile::exists(dir.path()+"/service.sock"));
+            const auto previous = store.profile(id); writeFile(dir.path()+"/override.yaml", "rules: [\"MATCH,DIRECT\"]\n");
+            url->setText("other.example"); QTest::mouseClick(add, Qt::LeftButton);
+            QCOMPARE(store.profile(id), previous); QVERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("覆写")); panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void policyGroupsSwitchIndependently()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost)); Store store;
+        auto settings = store.settings(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+        QString selected = "主选择"; int switches = 0, delays = 0;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); const int end = buffer->indexOf("\r\n\r\n"); if (end < 0) return;
+                    const auto length = QRegularExpression("Content-Length: (\\d+)", QRegularExpression::CaseInsensitiveOption).match(QString::fromUtf8(buffer->left(end)));
+                    if (length.hasMatch() && buffer->size() < end + 4 + length.captured(1).toInt()) return;
+                    QByteArray body = "{}"; int wait = 0;
+                    if (buffer->startsWith("PUT /proxies/AI ")) { selected = QJsonDocument::fromJson(buffer->mid(end+4)).object()["name"].toString(); ++switches; }
+                    if (buffer->startsWith("GET /configs ")) body = "{\"mode\":\"rule\"}";
+                    if (buffer->startsWith("GET /proxies ")) {
+                        QJsonObject proxies{{"GLOBAL", QJsonObject{{"all", QJsonArray{"AI", "主选择"}}, {"hidden", true}}},
+                            {"AI", QJsonObject{{"type", "Selector"}, {"all", QJsonArray{"主选择", "美国"}}, {"now", selected}}},
+                            {"主选择", QJsonObject{{"type", "Selector"}, {"all", QJsonArray{"日本03", "美国"}}, {"now", "日本03"}}},
+                            {"日本03", QJsonObject{{"type", "Hysteria2"}}}, {"美国", QJsonObject{{"type", "Hysteria2"}}}};
+                        body = QJsonDocument(QJsonObject{{"proxies", proxies}}).toJson(QJsonDocument::Compact);
+                    }
+                    if (buffer->contains("/delay?")) { ++delays; wait = 180; body = "{\"delay\":123}"; }
+                    buffer->clear();
+                    QTimer::singleShot(wait, socket, [socket, body] { socket->write("HTTP/1.1 200 OK\r\nContent-Length: "+QByteArray::number(body.size())+"\r\nConnection: close\r\n\r\n"+body); socket->disconnectFromHost(); });
+                });
+            }
+        });
+        {
+            Panel panel; panel.resize(750, 800); panel.show(); panel.openPage("Proxies");
+            QTRY_VERIFY(policyNodes(panel, "AI")); auto *nodes = policyNodes(panel, "AI"); QTRY_VERIFY(nodes->isVisible());
+            QCOMPARE(nodes->count(), 2); auto *header = policyButton(panel, "proxy-group-header", "AI"); QVERIFY(header); QVERIFY(header->isChecked());
+            bool route = false; for (auto *label : panel.findChildren<QLabel *>("proxy-group-route")) if (label->text() == "AI → 主选择 → 日本03") route = true; QVERIFY(route);
+            const QPersistentModelIndex stable(nodes->model()->index(0, 0));
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->delayRect(nodes->item(1)).center());
+            QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool()); QTRY_COMPARE(delays, 1); QTRY_VERIFY(!nodes->item(1)->data(NodeTestingRole).toBool());
+            QCOMPARE(selected, QString("主选择")); QCOMPARE(switches, 0);
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->visualItemRect(nodes->item(1)).topLeft()+QPoint(50, 24));
+            QTRY_COMPARE(selected, QString("美国")); QTRY_VERIFY(nodes->item(1)->data(NodeActiveRole).toBool()); QCOMPARE(switches, 1);
+            QVERIFY(stable.isValid());
+            route = false; for (auto *label : panel.findChildren<QLabel *>("proxy-group-route")) if (label->text() == "主选择 → 日本03") route = true; QVERIFY(route);
+            QTest::mouseClick(header, Qt::LeftButton); QVERIFY(!nodes->isVisible());
+            QTest::mouseClick(panel.findChild<QPushButton *>("refresh-proxy-panel"), Qt::LeftButton); QTest::qWait(80);
+            QVERIFY(stable.isValid()); QVERIFY(!header->isChecked()); QVERIFY(!nodes->isVisible()); panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void subscriptionPreviewData()
     {
         const auto preview = subscriptionNodes("proxies:\n  - {name: 日本A, type: ss, server: private.example, password: hidden}\n  - {name: 香港B, type: trojan, password: hidden}\nproxy-providers:\n  inline: {type: inline, payload: [{name: 美国C, type: vless}]}\n  remote: {type: http, url: https://example.com/provider}\nproxy-groups:\n  - {name: 选择, type: select, include-all: true}\n  - {name: 香港, type: url-test, include-all: true, filter: 香港}\n");
@@ -683,11 +786,11 @@ private slots:
             auto settings = store.settings(); QTcpServer probe; QVERIFY(probe.listen(QHostAddress::LocalHost));
             settings["endpoint"] = QString("http://127.0.0.1:%1").arg(probe.serverPort()); probe.close(); store.setSettings(settings);
             Panel panel; panel.resize(900, 700); panel.show(); panel.openPage("Proxies");
-            auto *nodes = panel.findChild<QListWidget *>("proxy-nodes"); auto *source = panel.findChild<QComboBox *>("node-subscription-source"); QVERIFY(nodes); QVERIFY(source);
+            auto *nodes = policyNodes(panel, "__dcc_subscription_nodes__"); auto *source = panel.findChild<QComboBox *>("group-subscription-source"); QVERIFY(nodes); QVERIFY(source);
             QTRY_COMPARE(nodes->count(), 1); QCOMPARE(nodes->item(0)->data(Qt::UserRole).toString(), QString("日本A"));
             QVERIFY(!nodes->item(0)->data(NodeActiveRole).toBool());
             QVERIFY(!panel.findChild<QPushButton *>("test-proxy-group")->isEnabled());
-            source->setCurrentIndex(source->findData(second)); QTRY_COMPARE(nodes->count(), 2);
+            source->setCurrentIndex(source->findData(second)); nodes = policyNodes(panel, "__dcc_subscription_nodes__"); QVERIFY(nodes); QTRY_COMPARE(nodes->count(), 2);
             const QPersistentModelIndex card(nodes->model()->index(0, 0)); QVERIFY(card.isValid());
             QTest::mouseClick(panel.findChild<QPushButton *>("refresh-proxy-panel"), Qt::LeftButton); QTest::qWait(150);
             QVERIFY(card.isValid()); QCOMPARE(nodes->count(), 2);
@@ -695,7 +798,7 @@ private slots:
             QVERIFY(!nodes->item(0)->data(NodeActiveRole).toBool());
             QVERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("订阅预览"));
             QVERIFY(!QFile::exists(dir.path()+"/service.sock")); QVERIFY(store.settings()["active"].toString().isEmpty());
-            source->setCurrentIndex(source->findData(first)); QTRY_COMPARE(nodes->count(), 1); panel.hide();
+            source->setCurrentIndex(source->findData(first)); nodes = policyNodes(panel, "__dcc_subscription_nodes__"); QVERIFY(nodes); QTRY_COMPARE(nodes->count(), 1); panel.hide();
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
     }
@@ -745,7 +848,7 @@ private slots:
             QVERIFY(subscriptionRequest.contains("User-Agent: Mozilla/5.0"));
             QCOMPARE(profile["suggestedUpdateMinutes"].toInt(), 720);
             panel.openPage("Proxies");
-            auto *nodes = panel.findChild<QListWidget *>("proxy-nodes"); QTRY_COMPARE(nodes->count(), 1);
+            auto *nodes = policyNodes(panel, "__dcc_subscription_nodes__"); QVERIFY(nodes); QTRY_COMPARE(nodes->count(), 1);
             QCOMPARE(panel.findChild<QComboBox *>("node-subscription-source")->currentData().toString(), profile["id"].toString());
             QVERIFY(!panel.findChild<QPushButton *>("test-proxy-group")->isEnabled());
             QVERIFY(!nodes->item(0)->data(NodeActiveRole).toBool());
@@ -866,8 +969,9 @@ private slots:
         });
         {
             Panel panel; panel.resize(900, 650); panel.show(); panel.openPage("Proxies");
-            auto *nodes = panel.findChild<QListWidget *>("proxy-nodes");
-            auto *group = panel.findChild<QPushButton *>("test-proxy-group");
+            QTRY_VERIFY(policyNodes(panel, "组"));
+            auto *nodes = policyNodes(panel, "组");
+            auto *group = policyButton(panel, "test-policy-group", "组");
             auto *refresh = panel.findChild<QPushButton *>("refresh-proxy-panel");
             QVERIFY(nodes); QVERIFY(group); QVERIFY(refresh);
             auto *testUrl = panel.findChild<QLineEdit *>("node-test-url");
@@ -978,7 +1082,7 @@ private slots:
         });
         {
             Panel panel; panel.resize(900, 650); panel.show(); panel.openPage("Proxies");
-            auto *nodes = panel.findChild<QListWidget *>("proxy-nodes");
+            QTRY_VERIFY(policyNodes(panel, "组 /日本")); auto *nodes = policyNodes(panel, "组 /日本");
             QVERIFY(nodes);
             QTRY_COMPARE(nodes->count(), 2);
             QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("已连接"));
