@@ -17,6 +17,8 @@
 #include <QTableWidget>
 #include <QPersistentModelIndex>
 #include <QLabel>
+#include <QJSEngine>
+#include <QPlainTextEdit>
 using namespace Party;
 class TestFrame : public DCC_NAMESPACE::FrameProxyInterface {
 public:
@@ -41,6 +43,54 @@ public:
 class PartyTests : public QObject {
     Q_OBJECT
 private slots:
+    void bypassValidation()
+    {
+        QCOMPARE(normalizeProxyBypass({" LOCALHOST ", "localhost", ".Example.COM", "*.example.com", "[::1]", "192.168.7.9/16", ""}),
+                 QStringList({"localhost", "*.example.com", "::1", "192.168.0.0/16"}));
+        QVERIFY(normalizeProxyBypass({}).isEmpty());
+        QCOMPARE(normalizeProxyBypass({"例子.测试"}).first(), QString("xn--fsqu00a.xn--0zwm56d"));
+        for (const auto &invalid : {"https://example.com", "192.168.0.0/99", "*.bad*.com", "a';return'DIRECT", "<local>", "a b.com"})
+            QVERIFY_EXCEPTION_THROWN(normalizeProxyBypass({invalid}), std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(normalizeProxyBypass(QString(513, QChar('x')).split('x')), std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(proxyPac(0, {}), std::runtime_error);
+    }
+    void bypassPacRoutes()
+    {
+        QJSEngine js;
+        auto source = proxyPac(17890, defaultProxyBypass() + QStringList{"*.example.com", "exact.test", "fc00::/7", "2001:db8::/32"});
+        QVERIFY(!js.evaluate(QString::fromUtf8(source)).isError());
+        js.evaluate("function dnsResolve(host) { return host==='intranet.test' ? '10.20.8.220' : '203.0.113.8'; }");
+        auto route = [&](const QString &host) {
+            return js.globalObject().property("FindProxyForURL").call({"https://" + host + "/", host}).toString();
+        };
+        for (const auto &host : {"localhost", "127.99.1.2", "192.168.8.1", "10.20.8.220", "172.16.0.1", "172.31.255.255", "[::1]", "fc00::1", "fdff:ffff::99", "2001:db8:1234::1", "x.EXAMPLE.com.", "exact.test", "intranet.test"})
+            QCOMPARE(route(host), QString("DIRECT"));
+        for (const auto &host : {"172.32.0.1", "192.169.0.1", "example.com", "badexample.com", "exact.test.evil", "2001:db9::1", "fe80::1", "public.test"})
+            QVERIFY2(route(host).startsWith("PROXY 127.0.0.1:17890;"), host);
+        js.evaluate("function dnsResolveEx(host) { return '2001:db8::7; 203.0.113.8'; }");
+        QCOMPARE(route("ipv6-intranet.test"), QString("DIRECT"));
+        QVERIFY(!js.evaluate(QString::fromUtf8(proxyPac(17890, {}))).isError());
+        QVERIFY(route("localhost").startsWith("PROXY")); // Explicit empty list disables bypass.
+        QVERIFY(route("10.20.8.220").startsWith("PROXY"));
+    }
+    void bypassSettingsPersist()
+    {
+        QTemporaryDir dir;
+        const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        {
+            Store store;
+            Panel panel;
+            auto *edit = panel.findChild<QPlainTextEdit *>("proxy-bypass"); QVERIFY(edit);
+            QCOMPARE(edit->toPlainText(), defaultProxyBypass().join('\n'));
+            auto settings = store.settings(); settings["proxyBypass"] = QJsonArray{"*.example.com", "10.0.0.0/8"}; store.setSettings(settings);
+            Panel restored;
+            QCOMPARE(restored.findChild<QPlainTextEdit *>("proxy-bypass")->toPlainText(), QString("*.example.com\n10.0.0.0/8"));
+            settings["proxyBypass"] = QJsonArray(); store.setSettings(settings);
+            Panel empty;
+            QVERIFY(empty.findChild<QPlainTextEdit *>("proxy-bypass")->toPlainText().isEmpty());
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void pluginPageSurvivesDeferredDeletion()
     {
         QTemporaryDir dir;
@@ -189,6 +239,25 @@ private slots:
         QCOMPARE(node["external-controller"].as<std::string>(), std::string("127.0.0.1:19090"));
         QCOMPARE(node["secret"].as<std::string>(), std::string("private-token"));
         QVERIFY(node["profile"]["store-selected"].as<bool>());
+    }
+    void runtimeNodeDnsCompatibility()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const QByteArray data = "dns: {enable: true, nameserver: [tls://example.invalid:853], enhanced-mode: fake-ip}\n";
+        const auto id = store.saveProfile("dns", {}, data);
+        auto runtime = parseConfig(store.runtime(id));
+        QCOMPARE(runtime["dns"]["proxy-server-nameserver"][0].as<std::string>(), std::string("system"));
+        QCOMPARE(runtime["dns"]["nameserver"][0].as<std::string>(), std::string("tls://example.invalid:853"));
+        QCOMPARE(runtime["dns"]["enhanced-mode"].as<std::string>(), std::string("fake-ip"));
+        store.saveProfile("dns", {}, "dns: {enable: true, proxy-server-nameserver: [https://example.net/dns-query]}\n", id);
+        runtime = parseConfig(store.runtime(id));
+        QCOMPARE(runtime["dns"]["proxy-server-nameserver"][0].as<std::string>(), std::string("https://example.net/dns-query"));
+        store.saveProfile("dns", {}, data, id);
+        auto settings = store.settings(); settings["systemNodeDns"] = false; store.setSettings(settings);
+        QVERIFY(!parseConfig(store.runtime(id))["dns"]["proxy-server-nameserver"]);
+        settings["systemNodeDns"] = true; store.setSettings(settings);
+        store.saveProfile("dns", {}, "dns: {enable: false}\n", id);
+        QVERIFY(!parseConfig(store.runtime(id))["dns"]["proxy-server-nameserver"]);
     }
     void endpointAndEncoding()
     {

@@ -51,7 +51,7 @@ public:
                 connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
                     const auto request = socket->readAll();
                     if (!request.startsWith("GET /proxy.pac ")) { socket->disconnectFromHost(); return; }
-                    const auto body = QByteArray("function FindProxyForURL(url, host) { if (isPlainHostName(host) || host === 'localhost' || isInNet(host, '127.0.0.0', '255.0.0.0')) return 'DIRECT'; return 'PROXY 127.0.0.1:") + QByteArray::number(m_pacProxyPort) + "; SOCKS5 127.0.0.1:" + QByteArray::number(m_pacProxyPort) + "; DIRECT'; }\n";
+                    const auto body = proxyPac(m_pacProxyPort, m_pacBypass);
                     socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nConnection: close\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body);
                     socket->disconnectFromHost();
                 });
@@ -132,6 +132,7 @@ private:
         if (restoreProxy) {
             try { restoreSystemProxy(); } catch (const std::exception &e) { log(QByteArray(e.what()) + '\n'); }
             m_pacServer.close();
+            m_systemProxyMode.clear();
         }
         if (m_core.state() == QProcess::NotRunning) return;
         m_stopping = true;
@@ -202,18 +203,57 @@ private:
         }
         if (action == "quit") { answer({{"ok", true}}); QTimer::singleShot(50, qApp, &QCoreApplication::quit); return; }
         if (action == "update") { updateProfiles(true); answer({{"ok", true}}); return; }
+        if (action == "bypass") {
+            if (!command["entries"].isArray()) throw std::runtime_error("Invalid bypass entries");
+            QStringList entries;
+            for (const auto &v : command["entries"].toArray()) {
+                if (!v.isString()) throw std::runtime_error("Invalid bypass entry");
+                entries.append(v.toString());
+            }
+            const auto bypass = normalizeProxyBypass(entries);
+            if (!m_systemProxyMode.isEmpty()) {
+                try { setSystemProxy(m_systemProxyMode, m_systemProxyPort, m_systemPacUrl, bypass); }
+                catch (...) { m_systemProxyMode.clear(); m_pacServer.close(); throw; }
+            }
+            auto settings = m_store.settings();
+            settings["proxyBypass"] = QJsonArray::fromStringList(bypass);
+            m_store.setSettings(settings);
+            m_pacBypass = bypass;
+            answer({{"message", m_systemProxyMode.isEmpty() ? "代理绕过已保存，启用系统代理或 PAC 后生效" : "代理绕过已保存并应用"}});
+            return;
+        }
         if (action == "proxy") {
             const auto mode = command["mode"].toString();
+            if (mode == "none") {
+                restoreSystemProxy();
+                m_systemProxyMode.clear();
+                m_pacServer.close();
+                answer({{"message", "已恢复原系统代理设置"}});
+                return;
+            }
             const int port = command["port"].toInt();
             QString pac = command["pac"].toString();
+            const auto settings = m_store.settings();
+            QStringList bypass = defaultProxyBypass();
+            if (settings["proxyBypass"].isArray()) {
+                bypass.clear();
+                for (const auto &v : settings["proxyBypass"].toArray()) bypass.append(v.toString());
+            }
+            bypass = normalizeProxyBypass(bypass);
             if (mode == "auto" && pac.isEmpty()) {
                 if (!m_pacServer.isListening() && !m_pacServer.listen(QHostAddress::LocalHost, 19091))
                     throw std::runtime_error(m_pacServer.errorString().toStdString());
                 m_pacProxyPort = port;
                 pac = "http://127.0.0.1:19091/proxy.pac";
             }
-            setSystemProxy(mode, port, pac);
-            answer({{"message", mode == "none" ? "已恢复原系统代理设置" : "系统代理已启用"}});
+            try { setSystemProxy(mode, port, pac, bypass); }
+            catch (...) { m_systemProxyMode.clear(); m_pacServer.close(); throw; }
+            m_systemProxyMode = mode;
+            m_systemProxyPort = port;
+            m_systemPacUrl = pac;
+            m_pacBypass = bypass;
+            if (mode != "auto") m_pacServer.close();
+            answer({{"message", "系统代理已启用"}});
             return;
         }
         answer({{"error", "Unknown command"}});
@@ -254,6 +294,10 @@ private:
     QNetworkAccessManager m_network;
     QTcpServer m_pacServer;
     int m_pacProxyPort = 0;
+    QStringList m_pacBypass = defaultProxyBypass();
+    QString m_systemProxyMode;
+    QString m_systemPacUrl;
+    int m_systemProxyPort = 0;
     QLockFile m_lock;
     QTimer m_updateTimer;
     QSet<QString> m_downloads;

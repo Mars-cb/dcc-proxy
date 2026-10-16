@@ -25,7 +25,7 @@
 | 实时流量、内存、连接数 | 已实现概览；未实现长期流量数据库和图表 |
 | 日志级别、暂停、清空、导出、后台日志 | 已实现 |
 | 系统手动代理、外部 PAC URL | 优先使用 DDE Network DBus，回退现有 gsettings 接口；停止时还原 |
-| 自带 PAC 服务、绕过列表专用编辑 | 自带 PAC 服务已实现；绕过列表专用编辑尚未实现 |
+| 自带 PAC 服务、绕过列表专用编辑 | 域名/通配域名/IPv4/IPv6/CIDR 编辑，默认局域网绕过；同步 DDE / gsettings 与动态 PAC，关闭时还原 |
 | 本地备份恢复、WebDAV | 已实现；格式与 Clash Party 备份不互通 |
 | Gist 同步、Age 加密 | 尚未实现 |
 | Sub-Store | 可导入其导出的完整 Mihomo 配置；未内置 Sub-Store 管理服务 |

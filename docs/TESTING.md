@@ -5,7 +5,7 @@
 
 ## 自动测试
 
-`tools/build-deb.sh` 在两个架构上均编译通过并生成对应 deb；内置 QtTest 的 14 项结果全部通过。
+`tools/build-deb.sh` 在两个架构上均编译通过并生成对应 deb；内置 QtTest 的 18 项结果全部通过。
 
 覆盖配置保存/合并/备份、安全校验、原始和 Base64 URI 订阅、真实本地 HTTP 请求、
 可见 URL 导入按钮、来源 URL 与订阅元数据、节点切换成功读回和失败保留当前节点。
@@ -16,6 +16,10 @@
 并确认轮询和手动刷新不销毁现有卡片模型，防止闪烁与丢失选择。
 卡片点击测试验证主体区域直接切换，点击未选中节点的延迟或失败状态仅测速，
 既不改变当前选中项，也不发送切换节点请求。
+
+绕过测试覆盖规范化和去重、无效输入拒绝、设置恢复与空列表语义，
+并通过现有 Qt JavaScript 引擎执行实际 PAC 函数，验证域名、IPv4/IPv6 CIDR 和 DNS 解析后的路由。
+节点 DNS 回归测试验证兼容选项只补充缺失的节点解析器，保留订阅其余 DNS 配置及明确指定的节点 DNS。
 
 ## 真实内核集成测试
 
@@ -32,9 +36,15 @@
 
 ARM64 deb 已安装到 `/usr/lib/dde-control-center/modules/libdcc-proxy.so`。
 控制中心可加载 `dcc-proxy`，名称为“私人代理”，节点页使用多列国旗卡片。
-真实 URL 订阅读取到 10 个 Hysteria2 节点；初次测试中有 5 个节点测速成功，
-选择实际节点后访问 HTTPS 测试端点返回 204。后续复测发现上游连接超时，
-因此不把初次成功等同于订阅节点持续可用；界面保留每个节点的实时测试结果和失败原因。
+真实 URL 订阅读取到 10 个 Hysteria2 节点。针对“全部测速失败”，同一 ARM64 内核和同一组节点进行隔离对比：
+完整订阅配置下测试失败；仅移除订阅 DNS，或仅增加 `proxy-server-nameserver: [system]` 后测试成功。
+最终修复使用后一种方式，保留订阅原有 DNS 规则，只解决节点服务器域名的启动解析问题。
+安装修复后的后台，10 个节点中 4 个测速成功；日本约 92–139 ms，美国约 190–215 ms。
+选择可用节点后实际 HTTPS 请求返回 204。其余节点仍可能因线路、IPv6 或服务端状态失败，不能保证订阅所有节点可用。
+
+`tests/smoke_system_proxy.py` 在远端实际 DDE Network DBus 上验证：关闭状态保存不启用代理、
+手动代理绕过写入/立即修改、内置 PAC 动态更新、空列表、无效输入不改变设置，
+以及退出时完整恢复原代理模式、地址、PAC URL 和绕过列表。
 
 真实订阅、节点密钥、测试机登录凭据和实际屏幕截图均未加入仓库。
 `docs/screenshots/node-grid.png` 使用虚拟节点生成，仅作布局示例。
@@ -47,4 +57,12 @@ python3 tests/smoke_real_core.py \
   --service build-$(dpkg --print-architecture)/dde-mihomo-daemon \
   --core cores/$(dpkg --print-architecture)/mihomo \
   --preview build-$(dpkg --print-architecture)/dcc-proxy-preview
+```
+
+系统代理集成测试会短暂修改当前桌面代理，并在结束时恢复，须明确传入测试开关：
+
+```sh
+python3 tests/smoke_system_proxy.py \
+  --service build-$(dpkg --print-architecture)/dde-mihomo-daemon \
+  --allow-system-proxy
 ```

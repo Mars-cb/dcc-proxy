@@ -51,11 +51,22 @@ URL 下载参考 Clash Party 的 User-Agent，支持重定向、订阅流量信�
 支持完整 YAML，以及原始或 Base64 编码的 Hysteria2、Trojan、VLESS、Shadowsocks、TUIC URI 列表。
 其他分享格式建议由订阅服务输出 Clash / Mihomo YAML。
 
+“设置 → 代理绕过”支持逐行填写域名、`*.example.com`、IPv4/IPv6 地址和 CIDR 网段。
+默认绕过本机及常见局域网地址，点击“保存并应用绕过”立即更新已开启的系统代理或内置 PAC；
+尚未启用代理时只保存列表。清空列表并保存可取消全部绕过。
+关闭系统代理或停止后台时，会恢复启用前的代理模式、地址和绕过列表。
+该列表作用于遵循系统代理设置的应用；TUN 和应用自行指定代理时，请使用 Mihomo 的 DIRECT 规则。
+
+默认开启“节点域名使用系统 DNS”，在订阅启用了 DNS 且未指定 `proxy-server-nameserver` 时，
+为节点服务器域名添加 `proxy-server-nameserver: [system]`，避免节点解析依赖尚未连通的代理。
+订阅已有的节点专用 DNS 会保留；可在设置中关闭兼容选项，重启内核后生效。
+
 默认控制器地址为 `http://127.0.0.1:19090`，首次运行生成随机 API 密钥。
 连接已运行内核时填写其控制器地址和密钥。远端控制器要求 HTTPS。
 
 后台通过当前用户专用 Unix socket 接受控制命令，插件退出不会结束后台。
-勾选登录自启后由 systemd 用户服务启动。取消勾选不停止当前内核。
+默认手动启动：点击“启动”或“使用此配置”才启动内核，打开控制中心本身不会启动内核。
+勾选登录自启后由 systemd 用户服务在登录时启动；取消勾选不停止当前内核。
 
 ```sh
 systemctl --user status dde-mihomo-daemon.service

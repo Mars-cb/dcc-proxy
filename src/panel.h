@@ -97,6 +97,8 @@ private:
     QLineEdit *m_secret;
     QLineEdit *m_corePath;
     QCheckBox *m_autoStart;
+    QCheckBox *m_systemNodeDns;
+    QPlainTextEdit *m_proxyBypass;
     QSpinBox *m_updateMinutes;
     QCheckBox *m_overrideEnabled;
     QCheckBox *m_scriptEnabled;

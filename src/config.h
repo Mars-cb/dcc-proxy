@@ -2,6 +2,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QString>
+#include <QStringList>
 #include <yaml-cpp/yaml.h>
 
 namespace Party {
@@ -21,7 +22,10 @@ QByteArray emitYaml(const YAML::Node &node);
 QJsonValue yamlToJson(const YAML::Node &node);
 QByteArray backup(const QString &root);
 void restore(const QString &root, const QByteArray &bytes);
-void setSystemProxy(const QString &mode, int port, const QString &pacUrl = {});
+QStringList defaultProxyBypass();
+QStringList normalizeProxyBypass(const QStringList &entries);
+QByteArray proxyPac(int port, const QStringList &entries);
+void setSystemProxy(const QString &mode, int port, const QString &pacUrl = {}, const QStringList &bypass = defaultProxyBypass());
 void restoreSystemProxy();
 
 class Store {

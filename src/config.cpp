@@ -345,6 +345,12 @@ QByteArray Store::runtime(const QString &id) const
         if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) fail(QString::fromUtf8(process.readAllStandardError()));
         node = parseConfig(process.readAllStandardOutput());
     }
+    // Bootstrap node hostnames independently from subscription DNS, which may
+    // require an already working proxy or DNS servers blocked by this network.
+    auto dns = node["dns"];
+    if (s.value("systemNodeDns").toBool(true) && dns && dns.IsMap() && dns["enable"] &&
+        dns["enable"].as<bool>() && !dns["proxy-server-nameserver"])
+        dns["proxy-server-nameserver"].push_back("system");
     validateConfig(node);
     const QUrl url(s["endpoint"].toString());
     const QString host = url.host();
@@ -422,11 +428,12 @@ void restoreSystemProxy()
     }
     if (!QFile::remove(path)) fail("Cannot remove system proxy snapshot");
 }
-void setSystemProxy(const QString &mode, int port, const QString &pacUrl)
+void setSystemProxy(const QString &mode, int port, const QString &pacUrl, const QStringList &bypass)
 {
     if (mode == "none") { restoreSystemProxy(); return; }
     if (mode != "manual" && mode != "auto") fail("Invalid proxy mode");
     if (port < 1 || port > 65535) fail("Enable mixed-port before configuring system proxy");
+    const auto normalizedBypass = normalizeProxyBypass(bypass);
     std::unique_ptr<QDBusInterface> network;
     QString service, objectPath;
     for (const auto &candidate : {QString("org.deepin.dde.Network1"), QString("com.deepin.daemon.Network")}) {
@@ -451,10 +458,21 @@ void setSystemProxy(const QString &mode, int port, const QString &pacUrl)
                 commands.append(QJsonObject{{"method", "SetProxy"}, {"args", QJsonArray{kind, old[0].toString(), old[1].toString()}}});
             }
             commands.append(QJsonObject{{"method", "SetAutoProxy"}, {"args", QJsonArray{call("GetAutoProxy").value(0).toString()}}});
+            commands.append(QJsonObject{{"method", "SetProxyIgnoreHosts"}, {"args", QJsonArray{call("GetProxyIgnoreHosts").value(0).toString()}}});
             commands.append(QJsonObject{{"method", "SetProxyMethod"}, {"args", QJsonArray{call("GetProxyMethod").value(0).toString()}}});
             writeFile(snapshotPath, QJsonDocument(QJsonObject{{"backend", "dbus"}, {"service", service}, {"path", objectPath}, {"interface", service}, {"commands", commands}}).toJson());
         }
+        auto snapshot = readJson(snapshotPath);
+        auto commands = snapshot["commands"].toArray();
+        bool capturedBypass = false;
+        for (const auto &v : commands) if (v.toObject()["method"].toString() == "SetProxyIgnoreHosts") capturedBypass = true;
+        if (!capturedBypass) {
+            commands.insert(qMax(0, commands.size() - 1), QJsonObject{{"method", "SetProxyIgnoreHosts"}, {"args", QJsonArray{call("GetProxyIgnoreHosts").value(0).toString()}}});
+            snapshot["commands"] = commands;
+            writeFile(snapshotPath, QJsonDocument(snapshot).toJson());
+        }
         try {
+            call("SetProxyIgnoreHosts", {normalizedBypass.join(',')});
             if (mode == "manual") for (const auto &kind : {"http", "https", "socks", "ftp"}) call("SetProxy", {QString(kind), QString("127.0.0.1"), QString::number(port)});
             if (mode == "auto") call("SetAutoProxy", {pacUrl});
             call("SetProxyMethod", {mode});
@@ -471,10 +489,22 @@ void setSystemProxy(const QString &mode, int port, const QString &pacUrl)
         };
         for (const auto &kind : {"http", "https", "socks", "ftp"}) { capture(schema + '.' + kind, "host"); capture(schema + '.' + kind, "port"); }
         capture(schema, "autoconfig-url");
+        capture(schema, "ignore-hosts");
         capture(schema, "mode");
         writeFile(path, QJsonDocument(QJsonObject{{"values", values}}).toJson());
     }
+    auto snapshot = readJson(path);
+    auto values = snapshot["values"].toArray();
+    bool capturedBypass = false;
+    for (const auto &v : values) if (v.toObject()["key"].toString() == "ignore-hosts") capturedBypass = true;
+    if (!capturedBypass) {
+        values.insert(qMax(0, values.size() - 1), QJsonObject{{"schema", schema}, {"key", "ignore-hosts"}, {"value", QString::fromUtf8(gsettings({"get", schema, "ignore-hosts"}))}});
+        snapshot["values"] = values;
+        writeFile(path, QJsonDocument(snapshot).toJson());
+    }
     try {
+        const QString hosts = normalizedBypass.isEmpty() ? "@as []" : QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(normalizedBypass)).toJson(QJsonDocument::Compact));
+        gsettings({"set", schema, "ignore-hosts", hosts});
         if (mode == "manual") for (const auto &kind : {"http", "https", "socks", "ftp"}) {
             gsettings({"set", schema + '.' + kind, "host", "127.0.0.1"});
             gsettings({"set", schema + '.' + kind, "port", QString::number(port)});

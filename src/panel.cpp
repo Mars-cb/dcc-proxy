@@ -646,6 +646,7 @@ QWidget *Panel::settingsPage()
     button(tr("选择"), coreRow, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, tr("选择 Mihomo / Smart 内核")); if (!path.isEmpty()) m_corePath->setText(path);
     }); form->addRow(tr("内核路径"), coreRow);
+    m_systemNodeDns = new QCheckBox(tr("节点域名使用系统 DNS（重启内核后生效）")); form->addRow(m_systemNodeDns);
     m_autoStart = new QCheckBox(tr("登录后自动启动上次使用的配置")); form->addRow(m_autoStart);
     m_updateMinutes = new QSpinBox; m_updateMinutes->setRange(0, 10080); m_updateMinutes->setSuffix(tr(" 分钟")); m_updateMinutes->setSpecialValueText(tr("关闭自动更新")); form->addRow(tr("订阅更新周期"), m_updateMinutes);
     layout->addLayout(form);
@@ -659,6 +660,23 @@ QWidget *Panel::settingsPage()
     button(tr("关闭系统代理"), proxy, this, [this] { systemProxy("none"); });
     button(tr("PAC"), proxy, this, [this] { systemProxy("auto"); });
     proxy->addStretch(); layout->addLayout(proxy);
+    auto *bypassLabel = new QLabel(tr("代理绕过")); layout->addWidget(bypassLabel);
+    auto *bypassHint = new QLabel(tr("每行一项，支持域名、*.example.com、IP 和 CIDR 网段。匹配的地址直连，适用于系统代理和内置 PAC。TUN 和应用手动指定代理时请在规则中设置 DIRECT。"));
+    bypassHint->setWordWrap(true); layout->addWidget(bypassHint);
+    m_proxyBypass = new QPlainTextEdit;
+    m_proxyBypass->setObjectName("proxy-bypass");
+    m_proxyBypass->setMinimumHeight(112); m_proxyBypass->setMaximumHeight(160);
+    m_proxyBypass->setPlaceholderText(defaultProxyBypass().join('\n')); layout->addWidget(m_proxyBypass);
+    auto *bypassRow = new QHBoxLayout;
+    button(tr("保存并应用绕过"), bypassRow, this, [this] {
+        guarded([&] {
+            const auto bypass = normalizeProxyBypass(m_proxyBypass->toPlainText().split('\n'));
+            m_proxyBypass->setPlainText(bypass.join('\n'));
+            backgroundCommand({{"action", "bypass"}, {"entries", QJsonArray::fromStringList(bypass)}});
+        });
+    });
+    button(tr("填入默认绕过"), bypassRow, this, [this] { m_proxyBypass->setPlainText(defaultProxyBypass().join('\n')); });
+    bypassRow->addStretch(); layout->addLayout(bypassRow);
     auto *backupRow = new QHBoxLayout;
     button(tr("本地备份"), backupRow, this, [this] {
         const auto path = QFileDialog::getSaveFileName(this, tr("备份"), "dcc-proxy-backup.json");
@@ -684,6 +702,13 @@ void Panel::loadSettings()
 {
     guarded([&] {
         const auto s = m_store.settings(); m_endpoint->setText(s["endpoint"].toString()); m_secret->setText(s["secret"].toString()); m_corePath->setText(s["core"].toString());
+        m_systemNodeDns->setChecked(s.value("systemNodeDns").toBool(true));
+        QStringList bypass = defaultProxyBypass();
+        if (s["proxyBypass"].isArray()) {
+            bypass.clear();
+            for (const auto &v : s["proxyBypass"].toArray()) bypass.append(v.toString());
+        }
+        m_proxyBypass->setPlainText(bypass.join('\n'));
         m_autoStart->setChecked(s["autoStart"].toBool()); m_updateMinutes->setValue(s["updateMinutes"].toInt(360));
         m_overrideEnabled->setChecked(s["overrideEnabled"].toBool(true)); m_scriptEnabled->setChecked(s["scriptEnabled"].toBool());
         m_davUrl->setText(s["webdavUrl"].toString()); m_davUser->setText(s["webdavUser"].toString());
@@ -699,6 +724,7 @@ void Panel::saveSettings()
         if (!m_api.configure(m_endpoint->text(), m_secret->text(), &error)) { message(error, true); return; }
         m_reads.clear(); m_polling = false; m_selecting = false;
         auto s = m_store.settings(); s["endpoint"] = m_endpoint->text(); s["secret"] = m_secret->text(); s["core"] = m_corePath->text();
+        s["systemNodeDns"] = m_systemNodeDns->isChecked();
         s["autoStart"] = m_autoStart->isChecked(); s["updateMinutes"] = m_updateMinutes->value();
         s["webdavUrl"] = m_davUrl->text(); s["webdavUser"] = m_davUser->text(); m_store.setSettings(s);
         const QString units = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/systemd/user/default.target.wants";
