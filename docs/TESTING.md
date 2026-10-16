@@ -134,3 +134,35 @@ CAP_NET_ADMIN 不存在。热加载不能改变已有进程权限。后台现在
 隔离 TUN 测试新增：先让内核以撤销 CAP_NET_ADMIN 的状态启动，再模拟完成授权。
 启用 TUN 必须自动更换该内核 PID、获得真实能力位，并成功执行 DNS 劫持与 HTTP。
 后续保存设置保持 PID。持续缺权的失败场景仍回退到可用配置。
+
+
+## 0.1.4 离线首次启动与完整数据
+
+远端 10.20.8.241 的启动失败来自缺少 MMDB，官方 GitHub 下载直连 5 秒连接超时，
+内核初始化下载等待 90 秒后失败。补齐 MMDB 和订阅缺失的 mixed-port 后，控制器 19090、
+混合代理 17890 就绪，显式通过本插件访问百度返回 200、Google generate_204 返回 204。
+现有 Clash 进程保持不变。
+
+包内提供 Country.mmdb、GeoIP.dat、GeoSite.dat、ASN.mmdb；固定官方仓库提交、
+Git blob 与 SHA-256 校验，复用现有 Python 标准库作为构建工具。安装脚本不执行 apt，
+运行时不下载上述基础资源。目标机器插件、后台全部动态库均可解析，Mihomo 是静态程序。
+
+`smoke_geodata.py` 在只有 lo 的独立网络空间中，用全新配置、空数据目录启动真正内核，
+配置同时使用 GEOIP、GEOSITE、IP-ASN，并将下载 URL 指向拒绝请求的本地服务。
+检查零下载请求、真实代理 HTTP 成功；覆盖 MMDB 与 GeoIP.dat 两种模式，四类下载中断
+缓存的备份恢复，以及已有可用旧数据库/geoip.metadb 别名不被覆盖。测试不使用真实订阅。
+
+```sh
+unshare --user --map-root-user --net python3 tests/smoke_geodata.py \
+  --host-netns "$(readlink /proc/self/ns/net)" \
+  --service build/dde-mihomo-daemon --resources cores/geodata
+```
+
+GeoIP 等构建缓存完整时，可以用 `tools/prepare-geodata.py --offline` 只校验不下载。
+Qt 回归增加缺失 mixed-port 时的默认监听及显式覆写优先级检查。
+
+
+导入预览回归：URL 导入完成后直接在节点页显示订阅内容；内核地址不可达时也可切换
+多个订阅，展示名称/协议/国旗与分组，重复刷新保留卡片。预览不创建后台 socket、不写
+active、不发切换/测速请求，不将未启动状态标为节点失败。inline provider、include-all、
+正则分组与私密节点字段不进入预览模型也有覆盖。

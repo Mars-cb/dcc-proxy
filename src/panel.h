@@ -46,6 +46,10 @@ private:
     QWidget *toolsPage();
     void refresh();
     void refreshProxies();
+    void reloadNodeSources();
+    void previewProfile(const QString &id = {});
+    void showProfileNodes(const QString &id);
+    void updateProxyGroups();
     void renderNodes();
     void selectNode();
     void testNodes(bool group, const QString &node = {});
@@ -94,6 +98,11 @@ private:
     QMap<QString, QAbstractButton *> m_tunFlags;
     QComboBox *m_mode;
     QComboBox *m_group;
+    QComboBox *m_nodeSource;
+    QLabel *m_nodeHint;
+    QPushButton *m_restoreAutomatic;
+    bool m_previewing = false;
+    QByteArray m_previewFingerprint;
     QLineEdit *m_nodeSearch;
     QComboBox *m_sort;
     QCheckBox *m_hideUnavailable;

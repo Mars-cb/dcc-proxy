@@ -6,12 +6,19 @@ export QT_QPA_PLATFORM = offscreen
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 DCC_PROXY_JOBS ?= 2
 DCC_PROXY_BUNDLE_CORE ?= 1
+DCC_PROXY_BUNDLE_GEODATA ?= 1
 CORE_VERSION := $(shell cat packaging/mihomo.version)
 
 ifeq ($(DCC_PROXY_BUNDLE_CORE),1)
 CORE_OPTIONS = -DMIHOMO_BINARY=$(CURDIR)/cores/$(DEB_HOST_ARCH)/mihomo -DMIHOMO_SOURCE_ARCHIVE=$(CURDIR)/cores/mihomo-$(CORE_VERSION)-source.tar.gz
 else
 CORE_OPTIONS = -DMIHOMO_BINARY= -DMIHOMO_SOURCE_ARCHIVE=
+endif
+
+ifeq ($(DCC_PROXY_BUNDLE_GEODATA),1)
+GEODATA_OPTIONS = -DMIHOMO_GEODATA_DIR=$(CURDIR)/cores/geodata
+else
+GEODATA_OPTIONS = -DMIHOMO_GEODATA_DIR=
 endif
 
 %:
@@ -21,7 +28,10 @@ override_dh_auto_configure:
 ifeq ($(DCC_PROXY_BUNDLE_CORE),1)
 	./tools/prepare-core.sh $(DEB_HOST_ARCH)
 endif
-	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo $(CORE_OPTIONS)
+ifeq ($(DCC_PROXY_BUNDLE_GEODATA),1)
+	./tools/prepare-geodata.py
+endif
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo $(CORE_OPTIONS) $(GEODATA_OPTIONS)
 
 # Preserve the official core byte-for-byte; debug symbols concern our own binaries.
 override_dh_strip:

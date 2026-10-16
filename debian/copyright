@@ -28,3 +28,9 @@ License: GPL-3
  The bundled official core is distributed with its corresponding source archive
  and GPL license under /usr/share/doc/dcc-proxy/.
  On Debian systems the license is also available in /usr/share/common-licenses/GPL-3.
+
+Files: cores/geodata/* packaging/geodata.* packaging/geodata-NOTICES.md
+Copyright: MetaCubeX/meta-rules-dat contributors and upstream data providers
+License: GPL-3
+ The upstream license and source/attribution references are installed as
+ /usr/share/doc/dcc-proxy/geodata.LICENSE and geodata-NOTICES.md.

@@ -1,0 +1,38 @@
+{
+  "repository": "https://github.com/MetaCubeX/meta-rules-dat",
+  "commit": "6a7865ed61619c1a6e6d246642018093f556c840",
+  "files": [
+    {
+      "file": "Country.mmdb",
+      "asset": "country.mmdb",
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/6a7865ed61619c1a6e6d246642018093f556c840/country.mmdb",
+      "sha256": "656023ffb50d464dee083b499c3f4f8292a43b72c9b4ff12a37f3e0a3944fbeb",
+      "size": 7647379,
+      "git_blob_sha1": "e78a39cb4bd900fa4205b19974849f2027b8a14f"
+    },
+    {
+      "file": "GeoIP.dat",
+      "asset": "geoip.dat",
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/6a7865ed61619c1a6e6d246642018093f556c840/geoip.dat",
+      "sha256": "2e55ebef34a161160b734cbfba072f206cc07be5eac93a7dee67b0ba85d46a1c",
+      "size": 16587403,
+      "git_blob_sha1": "6be5f33989d29c39efc23ceded9ffa2fa1483146"
+    },
+    {
+      "file": "GeoSite.dat",
+      "asset": "geosite.dat",
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/6a7865ed61619c1a6e6d246642018093f556c840/geosite.dat",
+      "sha256": "c524fa1d3ad541eba3cb2fa3ea4f8f89931f10143baecd00d4ef5f4dd54806f4",
+      "size": 4272778,
+      "git_blob_sha1": "176134081f115e7e4fa099ef81d90f7d635e070b"
+    },
+    {
+      "file": "ASN.mmdb",
+      "asset": "GeoLite2-ASN.mmdb",
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/6a7865ed61619c1a6e6d246642018093f556c840/GeoLite2-ASN.mmdb",
+      "sha256": "b9c1120510f02791c455fa667740a251e46e85d625fb977f8248d5ec1ebf6721",
+      "size": 8974108,
+      "git_blob_sha1": "13568a33683e08b2e0903b84e893692aad41470d"
+    }
+  ]
+}

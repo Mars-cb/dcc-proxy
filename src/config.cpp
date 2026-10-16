@@ -332,6 +332,10 @@ QByteArray Store::runtime(const QString &id) const
 {
     auto node = parseConfig(profile(id));
     const auto s = settings();
+    // Full YAML subscriptions can omit application listener settings.
+    if (!node["mixed-port"]) node["mixed-port"] = 17890;
+    // Base geodata is supplied offline; updates remain an explicit user action.
+    node["geo-auto-update"] = false;
     // Clash Party v2.0.3 controls unified-delay and enables it by default.
     node["unified-delay"] = true;
     if (QFile::exists(m_root + "/controlled.yaml"))

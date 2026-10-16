@@ -11,6 +11,8 @@ if [[ "${1:-}" != "--without-core" ]]; then
 else
   cmake_args+=(-DMIHOMO_BINARY= -DMIHOMO_SOURCE_ARCHIVE=)
 fi
+"$project_dir/tools/prepare-geodata.py"
+cmake_args+=(-DMIHOMO_GEODATA_DIR="$project_dir/cores/geodata")
 cmake "${cmake_args[@]}"
 cmake --build "$build_dir" --parallel "${DCC_PROXY_JOBS:-2}"
 QT_QPA_PLATFORM=offscreen ctest --test-dir "$build_dir" --output-on-failure

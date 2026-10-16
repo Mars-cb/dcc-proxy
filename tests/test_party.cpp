@@ -1,5 +1,6 @@
 #include "config.h"
 #include "tun.h"
+#include "subscriptionnodes.h"
 #include <DSwitchButton>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -264,6 +265,43 @@ private slots:
         QCOMPARE(b["proxy-groups"].size(), size_t(2));
         QVERIFY_EXCEPTION_THROWN(normalizeSubscription("<html>not a subscription</html>"), std::runtime_error);
     }
+    void subscriptionPreviewData()
+    {
+        const auto preview = subscriptionNodes("proxies:\n  - {name: 日本A, type: ss, server: private.example, password: hidden}\n  - {name: 香港B, type: trojan, password: hidden}\nproxy-providers:\n  inline: {type: inline, payload: [{name: 美国C, type: vless}]}\n  remote: {type: http, url: https://example.com/provider}\nproxy-groups:\n  - {name: 选择, type: select, include-all: true}\n  - {name: 香港, type: url-test, include-all: true, filter: 香港}\n");
+        QCOMPARE(preview.remoteProviders, 1);
+        QCOMPARE(preview.proxies["日本A"].toObject()["type"].toString(), QString("Shadowsocks"));
+        QCOMPARE(preview.proxies["选择"].toObject()["all"].toArray().size(), 3);
+        QCOMPARE(preview.proxies["香港"].toObject()["all"].toArray(), QJsonArray{"香港B"});
+        QVERIFY(!preview.proxies["日本A"].toObject().contains("password"));
+        QVERIFY(!preview.proxies["选择"].toObject().contains("now"));
+        QCOMPARE(subscriptionNodes("proxies: [{name: direct-only, type: direct}]\n").remoteProviders, 0);
+    }
+    void offlineSubscriptionChoice()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        {
+            Store store;
+            const auto first = store.saveProfile("first", {}, "proxies: [{name: 日本A, type: ss}]\n");
+            const auto second = store.saveProfile("second", {}, "proxies: [{name: 香港B, type: trojan}, {name: 美国C, type: vless}]\n");
+            auto settings = store.settings(); QTcpServer probe; QVERIFY(probe.listen(QHostAddress::LocalHost));
+            settings["endpoint"] = QString("http://127.0.0.1:%1").arg(probe.serverPort()); probe.close(); store.setSettings(settings);
+            Panel panel; panel.resize(900, 700); panel.show(); panel.openPage("Proxies");
+            auto *nodes = panel.findChild<QListWidget *>("proxy-nodes"); auto *source = panel.findChild<QComboBox *>("node-subscription-source"); QVERIFY(nodes); QVERIFY(source);
+            QTRY_COMPARE(nodes->count(), 1); QCOMPARE(nodes->item(0)->data(Qt::UserRole).toString(), QString("日本A"));
+            QVERIFY(!nodes->item(0)->data(NodeActiveRole).toBool());
+            QVERIFY(!panel.findChild<QPushButton *>("test-proxy-group")->isEnabled());
+            source->setCurrentIndex(source->findData(second)); QTRY_COMPARE(nodes->count(), 2);
+            const QPersistentModelIndex card(nodes->model()->index(0, 0)); QVERIFY(card.isValid());
+            QTest::mouseClick(panel.findChild<QPushButton *>("refresh-proxy-panel"), Qt::LeftButton); QTest::qWait(150);
+            QVERIFY(card.isValid()); QCOMPARE(nodes->count(), 2);
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->visualItemRect(nodes->item(0)).topLeft()+QPoint(50,24));
+            QVERIFY(!nodes->item(0)->data(NodeActiveRole).toBool());
+            QVERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("订阅预览"));
+            QVERIFY(!QFile::exists(dir.path()+"/service.sock")); QVERIFY(store.settings()["active"].toString().isEmpty());
+            source->setCurrentIndex(source->findData(first)); QTRY_COMPARE(nodes->count(), 1); panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void subscriptionUrlImport()
     {
         QTemporaryDir dir;
@@ -309,6 +347,12 @@ private slots:
             QCOMPARE(parseConfig(store.profile(profile["id"].toString()))["proxies"].size(), size_t(1));
             QVERIFY(subscriptionRequest.contains("User-Agent: mihomo.party/v2.0.3 (clash.meta)"));
             QCOMPARE(profile["suggestedUpdateMinutes"].toInt(), 720);
+            panel.openPage("Proxies");
+            auto *nodes = panel.findChild<QListWidget *>("proxy-nodes"); QTRY_COMPARE(nodes->count(), 1);
+            QCOMPARE(panel.findChild<QComboBox *>("node-subscription-source")->currentData().toString(), profile["id"].toString());
+            QVERIFY(!panel.findChild<QPushButton *>("test-proxy-group")->isEnabled());
+            QVERIFY(!nodes->item(0)->data(NodeActiveRole).toBool());
+            QVERIFY(!QFile::exists(dir.path() + "/service.sock"));
             panel.hide();
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
@@ -322,6 +366,20 @@ private slots:
         auto doc = QJsonDocument::fromJson(bytes).object(); auto files = doc["files"].toObject(); files["../escape"] = "dGVzdA=="; doc["files"] = files;
         QVERIFY_EXCEPTION_THROWN(restore(b.path(), QJsonDocument(doc).toJson()), std::runtime_error);
         QCOMPARE(restored.profile(id), store.profile(id));
+    }
+    void subscriptionWithoutMixedPort()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("full YAML", {}, "port: 7890\nsocks-port: 7891\ngeo-auto-update: true\nrules: [\"MATCH,DIRECT\"]\n");
+        auto config = parseConfig(store.runtime(id));
+        QCOMPARE(config["mixed-port"].as<int>(), 17890);
+        QCOMPARE(config["port"].as<int>(), 7890);
+        QCOMPARE(config["socks-port"].as<int>(), 7891);
+        QVERIFY(!config["geo-auto-update"].as<bool>());
+        writeFile(dir.path() + "/controlled.yaml", "mixed-port: 18890\n");
+        QCOMPARE(parseConfig(store.runtime(id))["mixed-port"].as<int>(), 18890);
+        writeFile(dir.path() + "/controlled.yaml", "mixed-port: 0\n");
+        QCOMPARE(parseConfig(store.runtime(id))["mixed-port"].as<int>(), 0);
     }
     void runtimeController()
     {

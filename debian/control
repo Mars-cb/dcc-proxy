@@ -5,6 +5,7 @@ Maintainer: DCC Proxy maintainers <Mars-cb@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 11),
  cmake (>= 3.13),
  pkg-config,
+ python3,
  qtbase5-dev (>= 5.11),
  qtdeclarative5-dev (>= 5.11),
  dde-control-center-dev,

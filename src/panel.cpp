@@ -2,6 +2,8 @@
 #include "nodeflags.h"
 #include "nodelist.h"
 #include "tun.h"
+#include "subscriptionnodes.h"
+#include <QCryptographicHash>
 #include <DSwitchButton>
 #include <QRegularExpression>
 #include <QVBoxLayout>
@@ -305,6 +307,13 @@ QWidget *Panel::proxiesPage()
 {
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
+    m_nodeSource = new QComboBox; m_nodeSource->setObjectName("node-subscription-source");
+    m_nodeSource->addItem(tr("自动（运行时显示实时节点）"), QString()); layout->addWidget(m_nodeSource);
+    m_nodeHint = new QLabel; m_nodeHint->setObjectName("node-source-status"); m_nodeHint->setWordWrap(true); layout->addWidget(m_nodeHint);
+    connect(m_nodeSource, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+        ++m_testEpoch; m_testing.clear(); m_testQueue.clear(); m_activeTests = 0;
+        m_testResults.clear(); m_testErrors.clear(); refreshProxies();
+    });
     m_group = new QComboBox; m_group->setObjectName("proxy-group"); layout->addWidget(m_group);
     auto *filters = new QHBoxLayout;
     m_nodeSearch = new QLineEdit; m_nodeSearch->setObjectName("node-search"); m_nodeSearch->setPlaceholderText(tr("搜索节点")); filters->addWidget(m_nodeSearch, 1);
@@ -319,7 +328,8 @@ QWidget *Panel::proxiesPage()
     m_testGroup = button(tr("测整个策略组"), test, this, [this] { testNodes(true); }); m_testGroup->setObjectName("test-proxy-group");
     layout->addLayout(test);
     auto *actions = new QHBoxLayout;
-    button(tr("恢复自动选择"), actions, this, [this] {
+    m_restoreAutomatic = button(tr("恢复自动选择"), actions, this, [this] {
+        if (m_previewing || !m_connected) return;
         const QString group = m_group->currentData().toString();
         if (group.isEmpty()) return;
         m_api.request("DELETE", "/proxies/" + Api::segment(group), {}, [this](const QJsonValue &, const QString &error) {
@@ -336,15 +346,67 @@ QWidget *Panel::proxiesPage()
     connect(m_nodes, &NodeList::delayClicked, this, [this](const QString &name) { testNodes(false, name); });
     return page;
 }
+void Panel::reloadNodeSources()
+{
+    const QSignalBlocker blocker(m_nodeSource);
+    const auto current = m_nodeSource->currentData().toString();
+    const auto profiles = m_store.profiles();
+    bool same = m_nodeSource->count() == profiles.size() + 1;
+    for (int i = 0; same && i < profiles.size(); ++i)
+        same = m_nodeSource->itemData(i + 1).toString() == profiles[i].toObject()["id"].toString();
+    if (!same) { m_nodeSource->clear(); m_nodeSource->addItem(tr("自动（运行时显示实时节点）"), QString()); }
+    for (int i = 0; i < profiles.size(); ++i) {
+        const auto profile = profiles[i].toObject(); const auto label = tr("订阅预览：%1").arg(profile["name"].toString());
+        if (!same) m_nodeSource->addItem(label, profile["id"].toString());
+        else if (m_nodeSource->itemText(i + 1) != label) m_nodeSource->setItemText(i + 1, label);
+    }
+    const int index = m_nodeSource->findData(current); m_nodeSource->setCurrentIndex(index >= 0 ? index : 0);
+    if (!m_connected || !m_nodeSource->currentData().toString().isEmpty()) previewProfile(m_nodeSource->currentData().toString());
+}
+void Panel::showProfileNodes(const QString &id)
+{
+    const QSignalBlocker blocker(m_nodeSource);
+    const int index = m_nodeSource->findData(id);
+    if (index >= 0) m_nodeSource->setCurrentIndex(index);
+    previewProfile(id);
+}
+void Panel::previewProfile(const QString &requested)
+{
+    guarded([this, requested] {
+        const auto profiles = m_store.profiles(); QString id = requested;
+        if (id.isEmpty()) id = m_store.settings()["active"].toString();
+        if (id.isEmpty() && !profiles.isEmpty()) id = profiles.first().toObject()["id"].toString();
+        QJsonObject profile;
+        for (const auto &value : profiles) if (value.toObject()["id"].toString() == id) { profile = value.toObject(); break; }
+        if (profile.isEmpty() && !profiles.isEmpty() && requested.isEmpty()) { profile = profiles.first().toObject(); id = profile["id"].toString(); }
+        if (profile.isEmpty()) {
+            m_previewing = true; m_previewFingerprint.clear(); m_proxyData = {};
+            labelText(m_nodeHint, tr("导入订阅后即可查看节点，无需启动内核或开启系统代理。")); updateProxyGroups(); return;
+        }
+        const auto bytes = m_store.profile(id);
+        const auto fingerprint = id.toUtf8() + QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
+        if (m_previewing && fingerprint == m_previewFingerprint) { renderNodes(); return; }
+        const auto preview = subscriptionNodes(bytes);
+        ++m_testEpoch; m_testing.clear(); m_testQueue.clear(); m_activeTests = 0;
+        m_testResults.clear(); m_testErrors.clear(); m_nodeProviders.clear(); m_providerProxyData = {};
+        m_previewing = true; m_previewFingerprint = fingerprint; m_proxyData = preview.proxies;
+        auto hint = tr("订阅预览：%1 · 启动并使用此配置后可切换节点和测速；无需开启系统代理。").arg(profile["name"].toString());
+        if (preview.remoteProviders) hint += tr(" %1 个远程节点提供者需加载后显示。").arg(preview.remoteProviders);
+        labelText(m_nodeHint, hint); updateProxyGroups();
+    });
+}
+
 void Panel::refreshProxies()
 {
+    const auto preview = m_nodeSource->currentData().toString();
+    if (!preview.isEmpty() || !m_connected) { previewProfile(preview); return; }
     if (m_reads.contains("proxies")) return;
     m_reads.insert("proxies");
     if (!m_reads.contains("proxy-providers")) {
         m_reads.insert("proxy-providers");
         m_api.get("/providers/proxies", [this](const QJsonValue &value, const QString &error) {
             m_reads.remove("proxy-providers");
-            if (!error.isEmpty()) return;
+            if (!error.isEmpty() || !m_nodeSource->currentData().toString().isEmpty() || !m_connected) return;
             m_nodeProviders.clear(); m_providerProxyData = {};
             const auto providers = value.toObject()["providers"].toObject();
             for (auto it = providers.begin(); it != providers.end(); ++it)
@@ -357,10 +419,18 @@ void Panel::refreshProxies()
     }
     m_api.get("/proxies", [this](const QJsonValue &value, const QString &error) {
         m_reads.remove("proxies");
-        if (!error.isEmpty()) { m_connected = false; message(error, true); return; }
+        if (!m_nodeSource->currentData().toString().isEmpty()) return;
+        if (!error.isEmpty()) { m_connected = false; previewProfile(); return; }
+        m_previewing = false; m_previewFingerprint.clear();
+        labelText(m_nodeHint, tr("实时节点 · 测速和切换不依赖系统代理开关"));
         m_proxyData = value.toObject()["proxies"].toObject();
         for (auto it = m_providerProxyData.begin(); it != m_providerProxyData.end(); ++it)
             if (!m_proxyData.contains(it.key())) m_proxyData[it.key()] = it.value();
+        updateProxyGroups();
+    });
+}
+void Panel::updateProxyGroups()
+{
         const auto current = m_group->currentData().toString();
         QSignalBlocker block(m_group);
         QStringList names;
@@ -376,17 +446,21 @@ void Panel::refreshProxies()
         if (!sameGroups) m_group->clear();
         for (int i = 0; i < groups.size(); ++i) {
             const auto p = m_proxyData[groups[i]].toObject();
-            const auto label = nodeDisplayName(groups[i]) + "  ·  " + p["type"].toString() + "  ·  " + nodeDisplayName(p["now"].toString());
+            const auto display = p["displayName"].toString(nodeDisplayName(groups[i]));
+            const auto label = display + "  ·  " + p["type"].toString() + (m_previewing ? QString() : "  ·  " + nodeDisplayName(p["now"].toString()));
             if (!sameGroups) m_group->addItem(label, groups[i]);
             else if (m_group->itemText(i) != label) m_group->setItemText(i, label);
         }
         int index = m_group->findData(current);
         m_group->setCurrentIndex(index >= 0 ? index : (m_group->count() ? 0 : -1));
         renderNodes();
-    });
+
 }
+
 void Panel::renderNodes()
 {
+    m_testGroup->setEnabled(m_connected && !m_previewing && m_testing.isEmpty());
+    m_restoreAutomatic->setEnabled(m_connected && !m_previewing);
     const auto *selected = m_nodes->currentItem();
     const QString selectedName = selected ? selected->data(Qt::UserRole).toString() : QString();
     const auto group = m_proxyData[m_group->currentData().toString()].toObject();
@@ -417,7 +491,7 @@ void Panel::renderNodes()
     if (!sameNodes) { m_nodes->setUpdatesEnabled(false); m_nodes->clear(); }
     for (int row = 0; row < nodes.size(); ++row) {
         const auto &node = nodes[row];
-        const bool active = group["now"].toString() == node.name;
+        const bool active = !m_previewing && group["now"].toString() == node.name;
         const bool testing = m_testing.contains(node.name);
         const auto delay = testing ? tr("测速中") : (node.delay < 0 ? tr("未测速") : (node.delay == 0 ? tr("超时") : tr("%1 ms").arg(node.delay)));
         auto *item = sameNodes ? m_nodes->item(row) : new QListWidgetItem(QIcon(nodeFlagPath(node.name)), QString(), m_nodes);
@@ -429,7 +503,7 @@ void Panel::renderNodes()
         item->setData(NodeDisplayNameRole, nodeDisplayName(node.name));
         item->setData(NodeTestingRole, testing);
         item->setData(NodeTestErrorRole, m_testErrors.value(node.name));
-        item->setToolTip(node.name + "\n" + tr("点击卡片使用节点；点击延迟或状态测速。") + (m_testErrors.value(node.name).isEmpty() ? QString() : "\n" + m_testErrors.value(node.name)));
+        item->setToolTip(node.name + "\n" + (m_previewing ? tr("订阅预览；启动并使用该配置后可切换节点和测速，无需开启系统代理。") : tr("点击卡片使用节点；点击延迟或状态测速。")) + (m_testErrors.value(node.name).isEmpty() ? QString() : "\n" + m_testErrors.value(node.name)));
         auto font = item->font(); font.setBold(active); item->setFont(font);
         if (!sameNodes && (node.name == selectedName || (selectedName.isEmpty() && active))) m_nodes->setCurrentItem(item);
     }
@@ -440,6 +514,7 @@ void Panel::renderNodes()
 }
 void Panel::selectNode()
 {
+    if (m_previewing) { message(tr("当前为订阅预览，启动并使用该配置后可切换节点；无需开启系统代理。")); return; }
     if (!m_connected || m_selecting || !m_nodes->currentItem()) return;
     const auto name = m_nodes->currentItem()->data(Qt::UserRole).toString();
     const auto group = m_group->currentData().toString();
@@ -455,6 +530,7 @@ void Panel::selectNode()
 }
 void Panel::testNodes(bool all, const QString &node)
 {
+    if (m_previewing) { message(tr("当前为订阅预览，启动并使用该配置后可测速；无需开启系统代理。")); return; }
     if (!m_connected || !m_testing.isEmpty()) return;
     QString target = m_testUrl->text().trimmed();
     if (target.isEmpty()) {
@@ -605,6 +681,7 @@ void Panel::reloadProfiles()
             if (current == p["id"].toString()) m_profiles->selectRow(i);
         }
         if (m_profiles->currentRow() < 0 && !list.isEmpty()) m_profiles->selectRow(0);
+        reloadNodeSources();
     });
 }
 QJsonObject Panel::selectedProfile() const
@@ -624,7 +701,7 @@ void Panel::importProfile(bool remote)
     } else {
         const auto path = QFileDialog::getOpenFileName(this, tr("导入配置"), {}, "YAML (*.yaml *.yml);;All (*)");
         if (path.isEmpty()) return;
-        guarded([&] { m_store.saveProfile(QFileInfo(path).completeBaseName(), {}, readFile(path)); reloadProfiles(); message(tr("配置已导入")); });
+        guarded([&] { const auto id = m_store.saveProfile(QFileInfo(path).completeBaseName(), {}, readFile(path)); reloadProfiles(); showProfileNodes(id); message(tr("配置已导入，可在节点页查看")); });
     }
 }
 void Panel::editProfile(bool create)
@@ -636,7 +713,7 @@ void Panel::editProfile(bool create)
         if (name.isEmpty()) return;
         const auto data = create ? QByteArray("mixed-port: 17890\nmode: rule\nlog-level: info\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n") : m_store.profile(p["id"].toString());
         editDocument(name, data, [this, p, name](QByteArray text) {
-            m_store.saveProfile(name, p["url"].toString(), text, p["id"].toString()); reloadProfiles(); message(tr("已保存；使用此配置后生效"));
+            const auto id = m_store.saveProfile(name, p["url"].toString(), text, p["id"].toString()); reloadProfiles(); showProfileNodes(id); message(tr("已保存；使用此配置后生效"));
         });
     });
 }
@@ -660,7 +737,8 @@ void Panel::fetchProfiles(const QUrl &url, const QString &name, const QString &i
             const auto savedId = m_store.saveProfile(name, url.toString(), bytes, id);
             m_store.updateProfileOptions(savedId, metadata);
             reloadProfiles();
-            message(tr("订阅已更新"));
+            showProfileNodes(savedId);
+            message(id.isEmpty() ? tr("订阅已导入，可在节点页查看") : tr("订阅已更新"));
             if (!id.isEmpty() && m_store.settings()["active"].toString() == id) runService("restart", id);
         });
     });
@@ -683,6 +761,9 @@ void Panel::backgroundCommand(const QJsonObject &command, Api::Done extra)
         if (coreOperation) m_coreBusy = false;
         if (value.isObject() && value.toObject().contains("running")) updateSwitches(value.toObject());
         if (extra) extra(value, error);
+        if (coreOperation && error.isEmpty() && value.toObject()["running"].toBool()) {
+            QSignalBlocker blocker(m_nodeSource); m_nodeSource->setCurrentIndex(0);
+        }
         if (!error.isEmpty()) { message(error, true); refresh(); return; }
         const auto text = value.toObject()["message"].toString();
         message(text.isEmpty() ? (value.toObject()["running"].toBool() ? tr("内核已启动") : tr("内核已停止")) : text);
@@ -1012,6 +1093,7 @@ void Panel::refresh()
         const bool wasConnected = m_connected;
         m_polling = false; m_connected = error.isEmpty();
         if (m_connected && !wasConnected) message(tr("已连接代理内核"));
+        if (m_tabs->currentIndex() == 1 && (!m_connected || !wasConnected || m_previewing)) refreshProxies();
         if (!m_connected) {
             m_mode->setEnabled(false);
             serviceRequest({{"action", "status"}}, this, [this](const QJsonValue &state, const QString &serviceError) {

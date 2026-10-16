@@ -1,6 +1,7 @@
 #include "config.h"
 #include "api.h"
 #include "tun.h"
+#include "geodata.h"
 #include <QNetworkInterface>
 #include <QDBusConnection>
 #include <QCoreApplication>
@@ -17,6 +18,7 @@
 #include <QJsonArray>
 #include <QJSEngine>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QDir>
 #include <QDateTime>
@@ -178,7 +180,7 @@ private:
             const auto document = QJsonDocument::fromJson(reply->readAll());
             const bool ready = m_core.state() == QProcess::Running && reply->error() == QNetworkReply::NoError && document.isObject();
             if (!ready) {
-                if (m_core.state() == QProcess::Running && attempt < 15) {
+                if (m_core.state() == QProcess::Running && m_readyTimer.elapsed() < 10000) {
                     QTimer::singleShot(100, this, [this, answer, attempt, preserveProxy] { completeStart(answer, attempt + 1, preserveProxy); });
                     return;
                 }
@@ -193,7 +195,7 @@ private:
                 if (m_expectedTun.value("enable").toBool()) {
                     const bool tunReady = document.object()["tun"].toObject()["enable"].toBool() &&
                         QNetworkInterface::interfaceFromName(m_tunDevice).isValid();
-                    if (!tunReady && m_tunError.isEmpty() && attempt < 15) {
+                    if (!tunReady && m_tunError.isEmpty() && m_readyTimer.elapsed() < 10000) {
                         QTimer::singleShot(100, this, [this, answer, attempt, preserveProxy] { completeStart(answer, attempt + 1, preserveProxy); });
                         return;
                     }
@@ -206,18 +208,20 @@ private:
                 const bool automatic = !preserveProxy && current.value("autoSystemProxy").toBool(true);
                 current["active"] = m_profile;
                 m_store.setSettings(current);
-                if (automatic) {
-                    const int port = document.object()["mixed-port"].toInt();
-                    if (port < 1 || port > 65535) throw std::runtime_error("自动启用系统代理需要配置有效的 mixed-port");
+                const int port = document.object()["mixed-port"].toInt();
+                if (m_expectedMixedPort > 0) {
                     QTcpSocket probe;
-                    probe.connectToHost(QHostAddress::LocalHost, quint16(port));
-                    if (!probe.waitForConnected(100)) {
-                        if (attempt < 15) {
+                    probe.connectToHost(QHostAddress::LocalHost, quint16(m_expectedMixedPort));
+                    if (port != m_expectedMixedPort || !probe.waitForConnected(100)) {
+                        if (m_readyTimer.elapsed() < 10000) {
                             QTimer::singleShot(100, this, [this, answer, attempt, preserveProxy] { completeStart(answer, attempt + 1, preserveProxy); });
                             return;
                         }
                         throw std::runtime_error("内核混合端口未就绪，请检查端口占用和监听地址");
                     }
+                }
+                if (automatic) {
+                    if (port < 1 || port > 65535) throw std::runtime_error("自动启用系统代理需要配置有效的 mixed-port");
                     QStringList bypass = defaultProxyBypass();
                     if (current["proxyBypass"].isArray()) {
                         bypass.clear();
@@ -253,6 +257,8 @@ private:
         if (!QFileInfo(core).isExecutable() || !QFileInfo(core).isFile()) throw std::runtime_error("Select an executable Mihomo core in Settings");
         const QString work = dataDir() + "/work";
         QDir().mkpath(work);
+        const int seeded = seedGeoData(work);
+        if (seeded) log(QString("已从安装包准备 %1 个地理数据库，无需在线下载\n").arg(seeded).toUtf8());
         const QString candidate = work + "/candidate.yaml";
         auto runtime = parseConfig(m_store.runtime(id));
         if (runtime["tun"]["enable"].as<bool>() && !hasTunPermission(core)) {
@@ -302,6 +308,7 @@ private:
                     }
                 }
                 writeFile(work + "/config.yaml", readFile(candidate));
+                m_expectedMixedPort = mixedPort;
                 m_tunError.clear(); m_coreLogBuffer.clear();
                 if (hotReload && m_core.state() == QProcess::Running) {
                     m_expectedTun = yamlToJson(config["tun"]).toObject();
@@ -318,6 +325,7 @@ private:
                 m_wanted = true;
                 m_core.setProcessEnvironment(env);
                 m_core.setWorkingDirectory(work);
+                m_readyTimer.start();
                 m_core.start(core, {"-d", work, "-f", work + "/config.yaml"});
                 if (!m_core.waitForStarted(2000)) throw std::runtime_error(m_core.errorString().toStdString());
                 completeStart(answer, 0, preserveProxy);
@@ -401,6 +409,7 @@ private:
     }
     void reloadRuntime(Answer answer)
     {
+        m_readyTimer.start();
         m_busy = true; m_error.clear();
         const auto settings = m_store.settings(); QUrl url(settings["endpoint"].toString()); url.setPath("/configs"); url.setQuery("force=true");
         QNetworkRequest request(url); request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -524,6 +533,8 @@ private slots:
     void prepareForSleep(bool sleeping) { if (sleeping) m_resumeTimer.stop(); else m_resumeTimer.start(); }
 private:
     QTimer m_resumeTimer;
+    QElapsedTimer m_readyTimer;
+    int m_expectedMixedPort = 0;
     QJsonObject m_expectedTun;
     bool m_tunEnabled = false;
     QString m_tunDevice;
