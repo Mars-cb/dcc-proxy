@@ -1,0 +1,13 @@
+[Unit]
+Description=Clash Party control center background service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/dcc-proxy/dde-mihomo-daemon --daemon
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target

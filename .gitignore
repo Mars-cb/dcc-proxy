@@ -1,0 +1,5 @@
+/build*/
+/dist/
+/cores/
+*.user
+*.part
