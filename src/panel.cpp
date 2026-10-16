@@ -646,6 +646,7 @@ QWidget *Panel::settingsPage()
     button(tr("选择"), coreRow, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, tr("选择 Mihomo / Smart 内核")); if (!path.isEmpty()) m_corePath->setText(path);
     }); form->addRow(tr("内核路径"), coreRow);
+    m_autoSystemProxy = new QCheckBox(tr("启动内核时自动启用系统代理")); m_autoSystemProxy->setObjectName("auto-system-proxy"); form->addRow(m_autoSystemProxy);
     m_systemNodeDns = new QCheckBox(tr("节点域名使用系统 DNS（重启内核后生效）")); form->addRow(m_systemNodeDns);
     m_autoStart = new QCheckBox(tr("登录后自动启动上次使用的配置")); form->addRow(m_autoStart);
     m_updateMinutes = new QSpinBox; m_updateMinutes->setRange(0, 10080); m_updateMinutes->setSuffix(tr(" 分钟")); m_updateMinutes->setSpecialValueText(tr("关闭自动更新")); form->addRow(tr("订阅更新周期"), m_updateMinutes);
@@ -702,6 +703,7 @@ void Panel::loadSettings()
 {
     guarded([&] {
         const auto s = m_store.settings(); m_endpoint->setText(s["endpoint"].toString()); m_secret->setText(s["secret"].toString()); m_corePath->setText(s["core"].toString());
+        m_autoSystemProxy->setChecked(s.value("autoSystemProxy").toBool(true));
         m_systemNodeDns->setChecked(s.value("systemNodeDns").toBool(true));
         QStringList bypass = defaultProxyBypass();
         if (s["proxyBypass"].isArray()) {
@@ -724,6 +726,7 @@ void Panel::saveSettings()
         if (!m_api.configure(m_endpoint->text(), m_secret->text(), &error)) { message(error, true); return; }
         m_reads.clear(); m_polling = false; m_selecting = false;
         auto s = m_store.settings(); s["endpoint"] = m_endpoint->text(); s["secret"] = m_secret->text(); s["core"] = m_corePath->text();
+        s["autoSystemProxy"] = m_autoSystemProxy->isChecked();
         s["systemNodeDns"] = m_systemNodeDns->isChecked();
         s["autoStart"] = m_autoStart->isChecked(); s["updateMinutes"] = m_updateMinutes->value();
         s["webdavUrl"] = m_davUrl->text(); s["webdavUser"] = m_davUser->text(); m_store.setSettings(s);

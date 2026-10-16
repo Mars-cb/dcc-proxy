@@ -1,0 +1,32 @@
+#!/usr/bin/make -f
+include /usr/share/dpkg/default.mk
+
+export QT_SELECT = qt5
+export QT_QPA_PLATFORM = offscreen
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DCC_PROXY_JOBS ?= 2
+DCC_PROXY_BUNDLE_CORE ?= 1
+CORE_VERSION := $(shell cat packaging/mihomo.version)
+
+ifeq ($(DCC_PROXY_BUNDLE_CORE),1)
+CORE_OPTIONS = -DMIHOMO_BINARY=$(CURDIR)/cores/$(DEB_HOST_ARCH)/mihomo -DMIHOMO_SOURCE_ARCHIVE=$(CURDIR)/cores/mihomo-$(CORE_VERSION)-source.tar.gz
+else
+CORE_OPTIONS = -DMIHOMO_BINARY= -DMIHOMO_SOURCE_ARCHIVE=
+endif
+
+%:
+	dh $@ --max-parallel=$(DCC_PROXY_JOBS) --buildsystem=cmake --builddirectory=build-debian
+
+override_dh_auto_configure:
+ifeq ($(DCC_PROXY_BUNDLE_CORE),1)
+	./tools/prepare-core.sh $(DEB_HOST_ARCH)
+endif
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=RelWithDebInfo $(CORE_OPTIONS)
+
+# Preserve the official core byte-for-byte; debug symbols concern our own binaries.
+override_dh_strip:
+	dh_strip --exclude=usr/lib/dcc-proxy/mihomo
+
+# Login startup remains the user's choice in the plugin Settings page.
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable

@@ -1,0 +1,30 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: dcc-proxy
+Source: https://github.com/Mars-cb/dcc-proxy
+
+Files: *
+Copyright: 2026 dcc-proxy contributors
+License: LGPL-3+
+ The full license is provided in LICENSE and on Debian systems in
+ /usr/share/common-licenses/LGPL-3.
+
+Files: third_party/dcc-interface/*
+Copyright: 2019-2023 UnionTech Software Technology Co., Ltd.
+License: LGPL-3+
+
+Files: third_party/yaml-cpp/*
+Copyright: 2008-2015 Jesse Beder
+License: MIT
+ The full license is installed as /usr/share/doc/dcc-proxy/yaml-cpp.LICENSE.
+
+Files: third_party/flag-icons/*
+Copyright: 2013 Panayiotis Lipiridis
+License: MIT
+ The full license is installed as /usr/share/doc/dcc-proxy/flag-icons.LICENSE.
+
+Files: cores/*/mihomo cores/mihomo-*-source.tar.gz packaging/mihomo.LICENSE
+Copyright: MetaCubeX and Mihomo contributors
+License: GPL-3
+ The bundled official core is distributed with its corresponding source archive
+ and GPL license under /usr/share/doc/dcc-proxy/.
+ On Debian systems the license is also available in /usr/share/common-licenses/GPL-3.

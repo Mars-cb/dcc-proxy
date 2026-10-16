@@ -10,10 +10,25 @@ UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模�
 使用已安装的 CMake、C++ 编译器、Qt 5.11+（Core、Widgets、Network、Qml、DBus、Test）和
 `dde-control-center-dev`。YAML 解析器已随源码提供，不需要安装新依赖。
 
+标准 Debian 打包（产物位于项目目录的上一级）：
+
+```sh
+cd /data/work/dcc-proxy
+dpkg-buildpackage -us -uc -b
+sudo dpkg -i ../dcc-proxy_0.1.0_$(dpkg --print-architecture).deb
+```
+
+也可继续使用 CPack 脚本（产物位于 `dist/`）：
+
 ```sh
 ./tools/build-deb.sh
 sudo dpkg -i dist/dcc-proxy_0.1.0_$(dpkg --print-architecture).deb
 ```
+
+两种方式共用 `tools/prepare-core.sh`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；
+缓存缺失时从官方 HTTPS 地址下载。断网构建前需准备相同缓存。
+需要使用现有内核时，标准打包可设置 `DCC_PROXY_BUNDLE_CORE=0`；CPack 使用 `--without-core`。
+默认最多使用 2 个编译任务，`DCC_PROXY_JOBS` 可调整。
 
 脚本根据**构建机器**的架构自动选择官方 Mihomo v1.19.12 内核，只打包对应架构。
 内核是官方预编译二进制；插件与后台管理程序在本机编译。下载缓存保存在 `cores/`，
@@ -37,7 +52,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 3. 在“设置”确认内核路径和控制器地址，保存并连接。
 4. 选择订阅，点击“使用此配置”，等待内核启动。
 5. 在“节点”选择策略组，点击节点卡片主体直接使用该节点；点击延迟或失败状态只测速，不切换节点。
-6. 按需开启系统代理或 TUN。TUN 要求内核已具有系统所需的网络管理权限。
+6. 启动成功后自动启用系统代理，浏览器可直接使用；停止时恢复原设置。TUN 仍按需开启，要求内核具有网络管理权限。
 
 节点使用自适应卡片网格显示，每张卡片包含国旗、名称、协议和延迟。
 国旗优先识别节点名中的地区旗帜，再识别中文地区名、常见英文地名及 ISO 地区代码。
@@ -65,6 +80,9 @@ URL 下载参考 Clash Party 的 User-Agent，支持重定向、订阅流量信�
 连接已运行内核时填写其控制器地址和密钥。远端控制器要求 HTTPS。
 
 后台通过当前用户专用 Unix socket 接受控制命令，插件退出不会结束后台。
+“启动内核时自动启用系统代理”默认开启，后台确认控制器和混合端口可用后才启用代理。
+“启动”“使用此配置”和重启内核都适用；启动验证失败时保留已有内核和代理设置。
+只需要应用手动指定代理的用户，可在设置中取消该选项。
 默认手动启动：点击“启动”或“使用此配置”才启动内核，打开控制中心本身不会启动内核。
 勾选登录自启后由 systemd 用户服务在登录时启动；取消勾选不停止当前内核。
 

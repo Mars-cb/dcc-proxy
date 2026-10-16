@@ -5,7 +5,8 @@
 
 ## 自动测试
 
-`tools/build-deb.sh` 在两个架构上均编译通过并生成对应 deb；内置 QtTest 的 18 项结果全部通过。
+`dpkg-buildpackage -us -uc -b` 和 `tools/build-deb.sh` 支持标准 Debian 与 CPack 两种打包方式。
+标准打包已在两个架构上完整编译、执行测试并生成对应 deb；内置 QtTest 的 18 项结果全部通过。
 
 覆盖配置保存/合并/备份、安全校验、原始和 Base64 URI 订阅、真实本地 HTTP 请求、
 可见 URL 导入按钮、来源 URL 与订阅元数据、节点切换成功读回和失败保留当前节点。
@@ -45,11 +46,25 @@ ARM64 deb 已安装到 `/usr/lib/dde-control-center/modules/libdcc-proxy.so`。
 `tests/smoke_system_proxy.py` 在远端实际 DDE Network DBus 上验证：关闭状态保存不启用代理、
 手动代理绕过写入/立即修改、内置 PAC 动态更新、空列表、无效输入不改变设置，
 以及退出时完整恢复原代理模式、地址、PAC URL 和绕过列表。
+新增启动联动验证：内核就绪后自动启用系统代理、无效配置保持原代理、重启跟随新端口、
+停止恢复原设置，以及明确关闭自动启用选项时不修改桌面代理。
 
 真实订阅、节点密钥、测试机登录凭据和实际屏幕截图均未加入仓库。
 `docs/screenshots/node-grid.png` 使用虚拟节点生成，仅作布局示例。
 
 ## 重现
+
+标准 Debian 打包，产物在项目目录上一级：
+
+```sh
+dpkg-buildpackage -us -uc -b
+```
+
+默认包包含当前架构官方内核及对应源码归档。`cores/` 缓存存在且校验通过时无需下载；
+不存在时从官方地址下载。可使用 `DCC_PROXY_BUNDLE_CORE=0` 打包不含内核的版本。
+安装不会自动启用登录自启，继续由插件设置控制。
+
+CPack 和内核集成测试：
 
 ```sh
 ./tools/build-deb.sh

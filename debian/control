@@ -1,0 +1,23 @@
+Source: dcc-proxy
+Section: net
+Priority: optional
+Maintainer: DCC Proxy maintainers <Mars-cb@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 11),
+ cmake (>= 3.13),
+ pkg-config,
+ qtbase5-dev (>= 5.11),
+ qtdeclarative5-dev (>= 5.11),
+ dde-control-center-dev,
+ curl,
+ gzip
+Standards-Version: 4.3.0
+Homepage: https://github.com/Mars-cb/dcc-proxy
+Rules-Requires-Root: no
+
+Package: dcc-proxy
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, dde-control-center, libqt5qml5, libqt5svg5
+Description: native private proxy plugin for the Deepin control center
+ Manage Mihomo subscriptions, proxy nodes, latency tests, connections,
+ rules, overrides, system proxy and PAC bypass settings in the control center.
+ The independent dde-mihomo-daemon keeps the proxy running after the UI closes.

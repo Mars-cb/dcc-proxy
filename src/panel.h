@@ -98,6 +98,7 @@ private:
     QLineEdit *m_corePath;
     QCheckBox *m_autoStart;
     QCheckBox *m_systemNodeDns;
+    QCheckBox *m_autoSystemProxy;
     QPlainTextEdit *m_proxyBypass;
     QSpinBox *m_updateMinutes;
     QCheckBox *m_overrideEnabled;

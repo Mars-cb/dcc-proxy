@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QJSEngine>
 #include <QPlainTextEdit>
+#include <QCheckBox>
 using namespace Party;
 class TestFrame : public DCC_NAMESPACE::FrameProxyInterface {
 public:
@@ -81,9 +82,11 @@ private slots:
             Store store;
             Panel panel;
             auto *edit = panel.findChild<QPlainTextEdit *>("proxy-bypass"); QVERIFY(edit);
+            QVERIFY(panel.findChild<QCheckBox *>("auto-system-proxy")->isChecked());
             QCOMPARE(edit->toPlainText(), defaultProxyBypass().join('\n'));
-            auto settings = store.settings(); settings["proxyBypass"] = QJsonArray{"*.example.com", "10.0.0.0/8"}; store.setSettings(settings);
+            auto settings = store.settings(); settings["autoSystemProxy"] = false; settings["proxyBypass"] = QJsonArray{"*.example.com", "10.0.0.0/8"}; store.setSettings(settings);
             Panel restored;
+            QVERIFY(!restored.findChild<QCheckBox *>("auto-system-proxy")->isChecked());
             QCOMPARE(restored.findChild<QPlainTextEdit *>("proxy-bypass")->toPlainText(), QString("*.example.com\n10.0.0.0/8"));
             settings["proxyBypass"] = QJsonArray(); store.setSettings(settings);
             Panel empty;

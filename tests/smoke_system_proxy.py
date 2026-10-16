@@ -14,6 +14,7 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--service', required=True)
+    parser.add_argument('--core', default='/usr/lib/dcc-proxy/mihomo')
     parser.add_argument('--allow-system-proxy', action='store_true',
                         help='temporarily change the current desktop proxy and restore it')
     args = parser.parse_args()
@@ -52,7 +53,7 @@ def main():
                 return json.loads(result.split(b'\n')[0])
         def ok(**data):
             result = command(**data)
-            assert 'error' not in result, result
+            assert not result.get('error'), result
             return result
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         def pac():
@@ -96,6 +97,49 @@ def main():
             assert not (root/'system-proxy-before.json').exists()
             ok(action='bypass', entries=['localhost'])
             assert state() == before
+            def free_port():
+                with socket.socket() as sock:
+                    sock.bind(('127.0.0.1', 0))
+                    return sock.getsockname()[1]
+            controller, mixed = free_port(), free_port()
+            settings = json.loads((root/'settings.json').read_text())
+            settings.update({'core': str(Path(args.core).resolve()),
+                             'endpoint': 'http://127.0.0.1:%s'%controller,
+                             'autoSystemProxy': True, 'updateMinutes': 0})
+            (root/'settings.json').write_text(json.dumps(settings))
+            fixture = root/'fixture.yaml'
+            fixture.write_text('mixed-port: %s\nmode: direct\nrules: ["MATCH,DIRECT"]\n'%mixed)
+            profile = subprocess.check_output([str(Path(args.service).resolve()), '--import', str(fixture), '--activate'], env=env, text=True).strip()
+            started = ok(action='start', profile=profile)
+            assert started['running'] and not started['busy']
+            assert dbus('GetProxyMethod') == 'manual'
+            assert dbus('GetProxy', 'https').splitlines() == ['127.0.0.1', str(mixed)]
+            assert dbus('GetProxyIgnoreHosts') == 'localhost'
+            assert '系统代理已启用' in started['message']
+            started_pid = started['pid']
+            bad = root/'invalid.yaml'
+            bad.write_text('mixed-port: invalid-port\n')
+            bad_profile = subprocess.check_output([str(Path(args.service).resolve()), '--import', str(bad)], env=env, text=True).strip()
+            failed = command(action='start', profile=bad_profile)
+            assert 'error' in failed
+            assert command(action='status')['pid'] == started_pid
+            assert dbus('GetProxy', 'https').splitlines() == ['127.0.0.1', str(mixed)]
+            new_mixed = free_port()
+            (root/'profiles'/('%s.yaml'%profile)).write_text('mixed-port: %s\nmode: direct\nrules: ["MATCH,DIRECT"]\n'%new_mixed)
+            restarted = ok(action='restart', profile=profile)
+            assert restarted['running']
+            assert dbus('GetProxy', 'https').splitlines() == ['127.0.0.1', str(new_mixed)]
+            assert not ok(action='stop')['running']
+            assert state() == before
+            assert not (root/'system-proxy-before.json').exists()
+            settings = json.loads((root/'settings.json').read_text())
+            settings['autoSystemProxy'] = False
+            (root/'settings.json').write_text(json.dumps(settings))
+            assert ok(action='start', profile=profile)['running']
+            assert state() == before, 'Explicit opt-out must preserve desktop proxy'
+            ok(action='stop')
+            assert state() == before
+            print('PASS: start automatically enables proxy after readiness, failed validation preserves proxy, restart updates port, stop restores, explicit opt-out')
             print('PASS: save while off, native manual bypass, live edits, dynamic PAC, empty list, invalid input, full restore')
         finally:
             try:

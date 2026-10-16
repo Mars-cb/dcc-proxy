@@ -3,3 +3,11 @@
 /cores/
 *.user
 *.part
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper
+/debian/*.debhelper.log
+/debian/dcc-proxy/
+/debian/dcc-proxy-dbgsym/

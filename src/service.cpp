@@ -139,6 +139,71 @@ private:
         m_core.terminate();
         if (!m_core.waitForFinished(3000)) { m_core.kill(); m_core.waitForFinished(1000); }
     }
+    void completeStart(Answer answer, int attempt = 0)
+    {
+        const auto settings = m_store.settings();
+        QUrl url(settings["endpoint"].toString()); url.setPath("/configs");
+        QNetworkRequest request(url);
+        request.setRawHeader("Authorization", "Bearer " + settings["secret"].toString().toUtf8());
+        auto *reply = m_network.get(request);
+        QTimer::singleShot(500, reply, &QNetworkReply::abort);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, answer, attempt] {
+            reply->deleteLater();
+            const auto document = QJsonDocument::fromJson(reply->readAll());
+            const bool ready = m_core.state() == QProcess::Running && reply->error() == QNetworkReply::NoError && document.isObject();
+            if (!ready) {
+                if (m_core.state() == QProcess::Running && attempt < 15) {
+                    QTimer::singleShot(100, this, [this, answer, attempt] { completeStart(answer, attempt + 1); });
+                    return;
+                }
+                m_busy = false; m_wanted = false; ++m_restartEpoch;
+                stopCore();
+                m_error = "内核启动失败：控制器未就绪，请检查日志和端口占用";
+                answer({{"error", m_error}});
+                return;
+            }
+            try {
+                auto current = m_store.settings();
+                const bool automatic = current.value("autoSystemProxy").toBool(true);
+                current["active"] = m_profile;
+                m_store.setSettings(current);
+                if (automatic) {
+                    const int port = document.object()["mixed-port"].toInt();
+                    if (port < 1 || port > 65535) throw std::runtime_error("自动启用系统代理需要配置有效的 mixed-port");
+                    QTcpSocket probe;
+                    probe.connectToHost(QHostAddress::LocalHost, quint16(port));
+                    if (!probe.waitForConnected(100)) {
+                        if (attempt < 15) {
+                            QTimer::singleShot(100, this, [this, answer, attempt] { completeStart(answer, attempt + 1); });
+                            return;
+                        }
+                        throw std::runtime_error("内核混合端口未就绪，请检查端口占用和监听地址");
+                    }
+                    QStringList bypass = defaultProxyBypass();
+                    if (current["proxyBypass"].isArray()) {
+                        bypass.clear();
+                        for (const auto &v : current["proxyBypass"].toArray()) bypass.append(v.toString());
+                    }
+                    setSystemProxy("manual", port, {}, bypass);
+                    m_systemProxyMode = "manual";
+                    m_systemProxyPort = port;
+                    m_systemPacUrl.clear();
+                    m_pacBypass = bypass;
+                    m_pacServer.close();
+                }
+                m_busy = false;
+                auto result = status();
+                result["message"] = automatic ? "内核已启动，系统代理已启用" : "内核已启动";
+                answer(result);
+            } catch (const std::exception &e) {
+                m_busy = false;
+                try { restoreSystemProxy(); } catch (...) { }
+                m_systemProxyMode.clear(); m_pacServer.close();
+                m_error = "内核已启动，但系统代理启用失败：" + QString::fromUtf8(e.what());
+                auto result = status(); result["error"] = m_error; answer(result);
+            }
+        });
+    }
     void startCore(const QString &id, Answer answer, bool recovery = false)
     {
         if (m_busy) { answer({{"error", "A core operation is in progress"}}); return; }
@@ -161,10 +226,9 @@ private:
         auto finish = [this, validator, complete, core, work, candidate, id, answer, env, recovery](bool success) {
             if (*complete) return;
             *complete = true;
-            m_busy = false;
             const auto output = QString::fromUtf8(validator->readAll()).right(2000);
             validator->deleteLater();
-            if (!success) { m_error = output.isEmpty() ? "Core configuration validation failed" : output; answer({{"error", m_error}}); return; }
+            if (!success) { m_busy = false; m_error = output.isEmpty() ? "Core configuration validation failed" : output; answer({{"error", m_error}}); return; }
             try {
                 // Validate first, then replace the running process.
                 writeFile(work + "/config.yaml", readFile(candidate));
@@ -177,11 +241,11 @@ private:
                 m_core.setWorkingDirectory(work);
                 m_core.start(core, {"-d", work, "-f", work + "/config.yaml"});
                 if (!m_core.waitForStarted(2000)) throw std::runtime_error(m_core.errorString().toStdString());
-                auto s = m_store.settings();
-                s["active"] = id;
-                m_store.setSettings(s);
-                answer(status());
-            } catch (const std::exception &e) { m_error = QString::fromUtf8(e.what()); answer({{"error", m_error}}); }
+                completeStart(answer);
+            } catch (const std::exception &e) {
+                m_busy = false; m_wanted = false; ++m_restartEpoch; stopCore();
+                m_error = QString::fromUtf8(e.what()); answer({{"error", m_error}});
+            }
         };
         connect(validator, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             [finish](int code, QProcess::ExitStatus state) { finish(code == 0 && state == QProcess::NormalExit); });

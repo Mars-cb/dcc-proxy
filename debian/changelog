@@ -1,0 +1,7 @@
+dcc-proxy (0.1.0) unstable; urgency=medium
+
+  * Package the native control center plugin and independent background service.
+  * Bundle the verified official Mihomo core matching the package architecture.
+  * Support dpkg-buildpackage alongside the existing CPack build script.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Fri, 16 Oct 2026 10:45:00 +0800

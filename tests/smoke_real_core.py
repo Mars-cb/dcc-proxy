@@ -55,7 +55,7 @@ def main():
         profile.write_text(config)
         settings = {"endpoint": "http://127.0.0.1:%d" % controller,
                     "secret": token, "core": str(Path(args.core).resolve()),
-                    "active": profile_id, "autoStart": False, "updateMinutes": 0}
+                    "active": profile_id, "autoStart": False, "autoSystemProxy": False, "updateMinutes": 0}
         (root / "settings.json").write_text(json.dumps(settings))
         (root / "profiles.json").write_text(json.dumps({"profiles": [
             {"id": profile_id, "name": "integration fixture", "url": ""}]}))
