@@ -2,10 +2,14 @@
 set -e
 core=/usr/lib/dcc-proxy/mihomo
 marker=/var/lib/dcc-proxy/restore-tun-grant
-if [ "$1" = configure ] && [ -f "$marker" ]; then
-    if [ -f "$core" ] && [ ! -L "$core" ] && [ "$(stat -c %u "$core")" = 0 ]; then
-        chmod u+s "$core"
+if [ "$1" = configure ]; then
+    # The bundled core always starts with effective UID 0, including without TUN.
+    # Keep the daemon and control center running as the desktop user.
+    if [ -f "$core" ] && [ ! -L "$core" ]; then
+        chown root:root "$core"
+        chmod 4755 "$core"
     fi
+    # Clean up the grant marker left by releases before 0.1.8.
     rm -f "$marker"
     rmdir /var/lib/dcc-proxy 2>/dev/null || true
 fi

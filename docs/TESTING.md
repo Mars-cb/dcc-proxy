@@ -3,6 +3,23 @@
 验证环境：本机 AMD64、远端 UOS 20 ARM64，Qt 5.11.3。
 使用环境已安装的构建工具和 Qt，未安装额外依赖。
 
+## 0.1.8 默认 root 内核
+
+安装和升级统一为随包内核设置 `root:root`、`4755`，后台守护进程保持桌面用户身份。
+启动时校验随包内核的实际有效 UID，状态中的 `root` 字段也读取实际进程身份。
+
+真实内核验证（独立临时目录、随机端口、不启用系统代理）：
+
+```sh
+python3 tests/smoke_real_core.py \
+  --service build-debian/dde-mihomo-daemon \
+  --core /usr/lib/dcc-proxy/mihomo --expect-root
+```
+
+本机通过：TUN 关闭时有效 UID 为 0、真实 UID 为桌面用户，父进程为用户守护进程；
+端口变更与崩溃恢复后仍为 root。普通用户可停止内核，重启和后台正常退出均不遗留旧进程。
+本地 HTTP/SOCKS 实际流量、无效配置和占用端口保留现有内核的检查同时通过。
+
 ## 自动测试
 
 `dpkg-buildpackage -us -uc -b` 和 `tools/build-deb.sh` 支持标准 Debian 与 CPack 两种打包方式。

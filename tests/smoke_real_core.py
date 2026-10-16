@@ -49,7 +49,10 @@ def main():
     parser.add_argument("--service", default="/usr/lib/dcc-proxy/dde-mihomo-daemon")
     parser.add_argument("--core", default="/usr/lib/dcc-proxy/mihomo")
     parser.add_argument("--preview")
+    parser.add_argument("--expect-root", action="store_true", help="Verify a user daemon manages the installed root core")
     args = parser.parse_args()
+    if args.expect_root:
+        assert os.geteuid() != 0, "Run as the desktop user to verify privilege separation"
     with tempfile.TemporaryDirectory(prefix="dcc-proxy-smoke-") as tmp:
         root = Path(tmp)
         (root / "profiles").mkdir()
@@ -86,7 +89,16 @@ def main():
                     if not part:
                         raise RuntimeError("Service closed without response")
                     data += part
-                return json.loads(data.split(b"\n")[0])
+                result = json.loads(data.split(b"\n")[0])
+                if args.expect_root and result.get("running"):
+                    assert result.get("root") is True, result
+                    status = Path('/proc/%d/status' % result['pid']).read_text().splitlines()
+                    uid = next(line for line in status if line.startswith('Uid:')).split()
+                    parent = next(line for line in status if line.startswith('PPid:')).split()
+                    assert int(uid[2]) == 0, uid
+                    assert int(uid[1]) == os.getuid(), uid
+                    assert int(parent[1]) == daemon.pid, parent
+                return result
 
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -119,6 +131,8 @@ def main():
             assert result["running"], result
             assert result["profile"] == profile_id, result
             print("PASS first imported profile starts without a prior active selection")
+            if args.expect_root:
+                print("PASS desktop user daemon starts a root core with TUN disabled")
             for _ in range(100):
                 try:
                     version = api("/version")
@@ -181,6 +195,7 @@ def main():
                        "redir-port": 0, "tproxy-port": 0}
             changed = command({"action": "ports", "options": options})
             assert changed.get("running") and not changed.get("error"), changed
+            assert not Path('/proc/%d' % original_pid).exists(), "Port restart left the old core running"
             mixed = new_mixed
             live = api("/configs")
             for key in ("mixed-port", "port", "socks-port"):
@@ -258,8 +273,16 @@ def main():
                 time.sleep(.1)
             else: raise AssertionError("Unexpected kernel crash did not recover")
             print("PASS unexpected kernel exit restarts the managed core and restores actual proxy traffic")
-            assert not command({"action": "stop"})["running"]
+            stopped_pid = command({"action": "status"})["pid"]
+            stopped = command({"action": "stop"})
+            assert not stopped["running"] and stopped.get("root") is False, stopped
+            assert not Path('/proc/%d' % stopped_pid).exists(), "Stop left the core running"
             print("PASS stop releases managed core")
+            exit_pid = command({"action": "start"})["pid"]
+            daemon.terminate()
+            daemon.wait(timeout=8)
+            assert not Path('/proc/%d' % exit_pid).exists(), "Daemon exit left an orphan core"
+            print("PASS daemon termination releases the managed core")
         finally:
             if preview is not None and preview.poll() is None:
                 preview.terminate()

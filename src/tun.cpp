@@ -67,6 +67,20 @@ bool hasTunPermission(const QString &core)
     const auto name = QFile::encodeName(core);
     return ::stat(name.constData(), &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == 0 && (info.st_mode & S_ISUID);
 }
+bool processRunsAsRoot(qint64 pid)
+{
+    if (pid <= 0) return false;
+    QFile status(QString("/proc/%1/status").arg(pid));
+    if (!status.open(QIODevice::ReadOnly)) return false;
+    for (const auto &line : status.readAll().split('\n')) {
+        if (!line.startsWith("Uid:")) continue;
+        const auto fields = line.simplified().split(' ');
+        bool ok = false;
+        const auto effectiveUid = fields.value(2).toUInt(&ok);
+        return ok && effectiveUid == 0;
+    }
+    return false;
+}
 bool processHasTunPermission(qint64 pid)
 {
     if (pid <= 0) return false;

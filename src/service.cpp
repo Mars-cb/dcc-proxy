@@ -150,7 +150,7 @@ private:
     QJsonObject status() const
     {
         return {{"running", m_core.state() == QProcess::Running}, {"pid", double(m_core.processId())},
-                {"profile", m_profile}, {"error", m_error}, {"busy", m_busy},
+                {"profile", m_profile}, {"error", m_error}, {"busy", m_busy}, {"root", processRunsAsRoot(m_core.processId())},
                 {"tun", QJsonObject{{"enable", m_tunEnabled && QNetworkInterface::interfaceFromName(m_tunDevice).isValid()},
                                      {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.settings()["core"].toString())},
                                      {"processPermission", processHasTunPermission(m_core.processId())}}}};
@@ -193,6 +193,12 @@ private:
             }
             try {
                 auto current = m_store.settings();
+                if (QFileInfo(m_core.program()).canonicalFilePath() == "/usr/lib/dcc-proxy/mihomo" &&
+                    !processRunsAsRoot(m_core.processId())) {
+                    m_busy = false; m_wanted = false; ++m_restartEpoch; stopCore(!preserveProxy);
+                    m_error = "随包内核未获得 root 权限，请重新安装 dcc-proxy，并检查文件系统是否禁用了 setuid";
+                    answer({{"error", m_error}}); return;
+                }
                 if (m_expectedTun.value("enable").toBool()) {
                     const bool tunReady = document.object()["tun"].toObject()["enable"].toBool() &&
                         QNetworkInterface::interfaceFromName(m_tunDevice).isValid();
@@ -256,6 +262,8 @@ private:
         const auto settings = m_store.settings();
         QString core = settings["core"].toString();
         if (!QFileInfo(core).isExecutable() || !QFileInfo(core).isFile()) throw std::runtime_error("Select an executable Mihomo core in Settings");
+        if (QFileInfo(core).canonicalFilePath() == "/usr/lib/dcc-proxy/mihomo" && !hasTunPermission(core))
+            throw std::runtime_error("随包内核缺少 root 启动授权，请重新安装 dcc-proxy 或在虚拟网卡页面授权内核");
         const QString work = dataDir() + "/work";
         QDir().mkpath(work);
         const int seeded = seedGeoData(work);

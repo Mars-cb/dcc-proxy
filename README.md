@@ -15,14 +15,14 @@ UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模�
 ```sh
 cd /data/work/dcc-proxy
 dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../dcc-proxy_0.1.4_$(dpkg --print-architecture).deb
+sudo dpkg -i ../dcc-proxy_0.1.8_$(dpkg --print-architecture).deb
 ```
 
 也可继续使用 CPack 脚本（产物位于 `dist/`）：
 
 ```sh
 ./tools/build-deb.sh
-sudo dpkg -i dist/dcc-proxy_0.1.4_$(dpkg --print-architecture).deb
+sudo dpkg -i dist/dcc-proxy_0.1.8_$(dpkg --print-architecture).deb
 ```
 
 两种方式共用 `tools/prepare-core.sh` 和 `tools/prepare-geodata.py`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；
@@ -53,7 +53,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 3. 在“设置”确认内核路径和控制器地址，保存并连接。
 4. 导入后即可在“节点”页预览订阅中的节点，无需启动内核或开启系统代理；顶部可切换预览订阅。首次使用时可打开概览中的“代理服务”开关；已有多个订阅时，选择订阅并点击“使用此配置”切换。
 5. 在“节点”选择策略组，点击节点卡片主体直接使用该节点；点击延迟或失败状态只测速，不切换节点。
-6. 启动成功后自动启用系统代理，浏览器可直接使用；停止时恢复原设置。TUN 按需开启，首次启用时通过系统认证为随包内核授权。
+6. 启动成功后自动启用系统代理，浏览器可直接使用；停止时恢复原设置。随包内核默认以 root 身份启动，TUN 按需开启。
 
 “节点”页的订阅预览直接读取已导入 YAML / URI 订阅，显示节点名称、协议、国旗和策略组。
 支持 inline provider、include-all 与分组过滤；远程 provider 的节点需加载其内容后显示。
@@ -91,10 +91,12 @@ Linux 的通配符与 Clash Party 一致，只支持开头的 `*.`，不支持 `
 各协议栈是否可用取决于所选内核；校验或创建失败时显示内核错误并恢复原配置。
 启用时联动开启 DNS，关闭 TUN 时保留 DNS；保存其它设置不会意外关闭 TUN。
 已获得网络管理权限的内核通过热加载应用设置，不重启进程；首次文件授权后，若当前进程
-仍没有 CAP_NET_ADMIN，会自动重启本插件自己的内核一次使授权生效。后续切换不重复鉴权，deb 升级时保留已有授权；首次安装不会自动授权。
+仍没有 CAP_NET_ADMIN，会自动重启本插件自己的内核一次使授权生效。后续切换不重复鉴权。
 恢复唤醒 5 秒后重新加载配置。
-首次启用需要系统管理员认证，仅对 `/usr/lib/dcc-proxy/mihomo` 执行与 Linux Clash Party 相同的
-root 所有权和 setuid 授权。自定义内核需自行授权；已存在的同名网卡不会被接管。
+安装和升级时将 `/usr/lib/dcc-proxy/mihomo` 设置为 `root:root`、权限 `4755`，
+使随包内核在 TUN 关闭时也以 root 有效身份启动；后台守护进程和控制中心仍以当前用户运行。
+启动后检查内核实际有效 UID，授权未生效时明确报错；后台状态的 `root` 字段反映实际进程身份。
+“内核授权”可修复被移除的授权，自定义内核仍需自行授权；已存在的同名网卡不会被接管。
 
 概览的内核状态和连接统计分别显示，只更新变化内容，避免异步请求反复改写同一标签导致闪烁。
 代理服务开关与后台真实状态同步，操作期间禁用，失败后读回恢复。
