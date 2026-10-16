@@ -132,7 +132,7 @@ Panel::Panel(QWidget *parent) : QWidget(parent), m_api(this), m_download(this)
     m_tabs->addTab(settingsPage(), tr("设置"));
     connect(&m_api, &Api::configurationChanged, this, [this] {
         ++m_testEpoch; m_testing.clear(); m_testQueue.clear(); m_activeTests = 0;
-        m_testResults.clear(); m_testErrors.clear();
+        m_testResults.clear(); m_testErrors.clear(); m_nodeProviders.clear(); m_providerProxyData = {};
         m_testGroup->setEnabled(true); renderNodes();
     });
     loadSettings();
@@ -208,8 +208,9 @@ QWidget *Panel::proxiesPage()
     layout->addLayout(filters);
     m_nodes = new NodeList; m_nodes->setObjectName("proxy-nodes"); layout->addWidget(m_nodes, 1);
     auto *test = new QHBoxLayout;
-    m_testUrl = new QLineEdit("https://www.gstatic.com/generate_204"); m_testUrl->setObjectName("node-test-url"); test->addWidget(m_testUrl, 1);
-    m_testTimeout = new QSpinBox; m_testTimeout->setRange(1, 30); m_testTimeout->setValue(10); m_testTimeout->setSuffix(tr(" 秒")); m_testTimeout->setToolTip(tr("每个节点的测速超时")); test->addWidget(m_testTimeout);
+    m_testUrl = new QLineEdit; m_testUrl->setPlaceholderText(tr("留空使用策略组地址或 https://www.gstatic.com/generate_204")); m_testUrl->setObjectName("node-test-url"); test->addWidget(m_testUrl, 1);
+    m_testTimeout = new QSpinBox; m_testTimeout->setObjectName("node-test-timeout"); m_testTimeout->setRange(1, 30000); m_testTimeout->setValue(5000); m_testTimeout->setSuffix(" ms"); m_testTimeout->setToolTip(tr("每个节点的测速超时")); test->addWidget(m_testTimeout);
+    m_testConcurrency = new QSpinBox; m_testConcurrency->setObjectName("node-test-concurrency"); m_testConcurrency->setRange(1, 256); m_testConcurrency->setValue(50); m_testConcurrency->setSuffix(tr(" 并发")); test->addWidget(m_testConcurrency);
     m_testGroup = button(tr("测整个策略组"), test, this, [this] { testNodes(true); }); m_testGroup->setObjectName("test-proxy-group");
     layout->addLayout(test);
     auto *actions = new QHBoxLayout;
@@ -234,10 +235,27 @@ void Panel::refreshProxies()
 {
     if (m_reads.contains("proxies")) return;
     m_reads.insert("proxies");
+    if (!m_reads.contains("proxy-providers")) {
+        m_reads.insert("proxy-providers");
+        m_api.get("/providers/proxies", [this](const QJsonValue &value, const QString &error) {
+            m_reads.remove("proxy-providers");
+            if (!error.isEmpty()) return;
+            m_nodeProviders.clear(); m_providerProxyData = {};
+            const auto providers = value.toObject()["providers"].toObject();
+            for (auto it = providers.begin(); it != providers.end(); ++it)
+                for (const auto &v : it.value().toObject()["proxies"].toArray()) {
+                    const auto proxy = v.toObject(); const auto name = proxy["name"].toString();
+                    if (!name.isEmpty()) { m_nodeProviders[name] = it.key(); m_providerProxyData[name] = proxy; if (!m_proxyData.contains(name)) m_proxyData[name] = proxy; }
+                }
+            renderNodes();
+        });
+    }
     m_api.get("/proxies", [this](const QJsonValue &value, const QString &error) {
         m_reads.remove("proxies");
         if (!error.isEmpty()) { m_connected = false; message(error, true); return; }
         m_proxyData = value.toObject()["proxies"].toObject();
+        for (auto it = m_providerProxyData.begin(); it != m_providerProxyData.end(); ++it)
+            if (!m_proxyData.contains(it.key())) m_proxyData[it.key()] = it.value();
         const auto current = m_group->currentData().toString();
         QSignalBlocker block(m_group);
         QStringList names;
@@ -333,7 +351,20 @@ void Panel::selectNode()
 void Panel::testNodes(bool all, const QString &node)
 {
     if (!m_connected || !m_testing.isEmpty()) return;
-    const QUrl testUrl(m_testUrl->text());
+    QString target = m_testUrl->text().trimmed();
+    if (target.isEmpty()) {
+        target = m_proxyData[m_group->currentData().toString()].toObject()["testUrl"].toString();
+        if (target.isEmpty()) {
+            try {
+                const auto runtime = parseConfig(m_store.runtime(m_store.settings()["active"].toString()));
+                if (runtime["proxy-groups"]) for (const auto &group : runtime["proxy-groups"])
+                    if (group["name"] && group["url"] && QString::fromStdString(group["name"].as<std::string>()) == m_group->currentData().toString())
+                        target = QString::fromStdString(group["url"].as<std::string>());
+            } catch (...) { }
+        }
+    }
+    if (target.isEmpty()) target = "https://www.gstatic.com/generate_204";
+    const QUrl testUrl(target);
     if (testUrl.scheme() != "https" && testUrl.scheme() != "http") { message(tr("请输入 HTTP 或 HTTPS 测试地址"), true); return; }
     QStringList names;
     if (all) for (const auto &v : m_proxyData[m_group->currentData().toString()].toObject()["all"].toArray()) names << v.toString();
@@ -342,7 +373,12 @@ void Panel::testNodes(bool all, const QString &node)
     if (names.isEmpty()) return;
     ++m_testEpoch;
     m_testPassed = 0; m_testFailed = 0;
-    m_testTimeoutMs = m_testTimeout->value() * 1000;
+    m_testTimeoutMs = m_testTimeout->value();
+    guarded([&] {
+        auto s = m_store.settings(); s["delayTestUrl"] = m_testUrl->text().trimmed();
+        s["delayTestTimeout"] = m_testTimeoutMs; s["delayTestConcurrency"] = m_testConcurrency->value();
+        m_store.setSettings(s);
+    });
     QUrlQuery query; query.addQueryItem("url", testUrl.toString()); query.addQueryItem("timeout", QString::number(m_testTimeoutMs));
     m_testQuery = query.toString(QUrl::FullyEncoded);
     for (const auto &name : names) { m_testing.insert(name); m_testQueue.enqueue(name); m_testErrors.remove(name); }
@@ -353,11 +389,13 @@ void Panel::testNodes(bool all, const QString &node)
 void Panel::runNodeTests()
 {
     // Individual requests preserve successful results when another group member times out.
-    while (m_activeTests < 4 && !m_testQueue.isEmpty()) {
+    while (m_activeTests < m_testConcurrency->value() && !m_testQueue.isEmpty()) {
         const auto name = m_testQueue.dequeue();
         const auto epoch = m_testEpoch;
         ++m_activeTests;
-        const auto path = "/proxies/" + Api::segment(name) + "/delay?" + m_testQuery;
+        const auto provider = m_nodeProviders.value(name);
+        const auto path = provider.isEmpty() ? "/proxies/" + Api::segment(name) + "/delay?" + m_testQuery :
+            "/providers/proxies/" + Api::segment(provider) + '/' + Api::segment(name) + "/healthcheck?" + m_testQuery;
         m_api.get(path, [this, name, epoch](const QJsonValue &value, const QString &error) {
             if (epoch != m_testEpoch) return;
             --m_activeTests; m_testing.remove(name);
@@ -646,6 +684,7 @@ QWidget *Panel::settingsPage()
     button(tr("选择"), coreRow, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, tr("选择 Mihomo / Smart 内核")); if (!path.isEmpty()) m_corePath->setText(path);
     }); form->addRow(tr("内核路径"), coreRow);
+    m_unifiedDelay = new QCheckBox(tr("统一延迟（与 Clash Party 一致，重启内核后生效）")); m_unifiedDelay->setObjectName("unified-delay"); form->addRow(m_unifiedDelay);
     m_autoSystemProxy = new QCheckBox(tr("启动内核时自动启用系统代理")); m_autoSystemProxy->setObjectName("auto-system-proxy"); form->addRow(m_autoSystemProxy);
     m_systemNodeDns = new QCheckBox(tr("节点域名使用系统 DNS（重启内核后生效）")); form->addRow(m_systemNodeDns);
     m_autoStart = new QCheckBox(tr("登录后自动启动上次使用的配置")); form->addRow(m_autoStart);
@@ -703,6 +742,12 @@ void Panel::loadSettings()
 {
     guarded([&] {
         const auto s = m_store.settings(); m_endpoint->setText(s["endpoint"].toString()); m_secret->setText(s["secret"].toString()); m_corePath->setText(s["core"].toString());
+        m_testUrl->setText(s["delayTestUrl"].toString());
+        m_testTimeout->setValue(s["delayTestTimeout"].toInt(5000));
+        m_testConcurrency->setValue(s["delayTestConcurrency"].toInt(50));
+        const auto controlledPath = dataDir() + "/controlled.yaml";
+        const auto controlled = QFile::exists(controlledPath) ? parseConfig(readFile(controlledPath)) : YAML::Node(YAML::NodeType::Map);
+        m_unifiedDelay->setChecked(!controlled["unified-delay"] || controlled["unified-delay"].as<bool>());
         m_autoSystemProxy->setChecked(s.value("autoSystemProxy").toBool(true));
         m_systemNodeDns->setChecked(s.value("systemNodeDns").toBool(true));
         QStringList bypass = defaultProxyBypass();
@@ -726,6 +771,9 @@ void Panel::saveSettings()
         if (!m_api.configure(m_endpoint->text(), m_secret->text(), &error)) { message(error, true); return; }
         m_reads.clear(); m_polling = false; m_selecting = false;
         auto s = m_store.settings(); s["endpoint"] = m_endpoint->text(); s["secret"] = m_secret->text(); s["core"] = m_corePath->text();
+        const auto controlledPath = dataDir() + "/controlled.yaml";
+        auto controlled = QFile::exists(controlledPath) ? parseConfig(readFile(controlledPath)) : YAML::Node(YAML::NodeType::Map);
+        controlled["unified-delay"] = m_unifiedDelay->isChecked(); writeFile(controlledPath, emitYaml(controlled));
         s["autoSystemProxy"] = m_autoSystemProxy->isChecked();
         s["systemNodeDns"] = m_systemNodeDns->isChecked();
         s["autoStart"] = m_autoStart->isChecked(); s["updateMinutes"] = m_updateMinutes->value();
@@ -849,7 +897,7 @@ void Panel::refresh()
                 const auto s = state.toObject();
                 if (s["busy"].toBool()) m_overview->setText(tr("正在验证配置并启动内核，请稍候…"));
                 else if (!s["error"].toString().isEmpty()) m_overview->setText(tr("内核启动失败：%1").arg(s["error"].toString()));
-                else if (!s["running"].toBool()) m_overview->setText(tr("后台已运行，内核未启动。请选择订阅并点击“使用此配置”。"));
+                else if (!s["running"].toBool()) m_overview->setText(tr("后台已运行，内核未启动。导入订阅后可直接点击“启动”，也可选择订阅并点击“使用此配置”。"));
             });
             return;
         }

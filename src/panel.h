@@ -84,6 +84,10 @@ private:
     QPushButton *m_testGroup;
     QLineEdit *m_testUrl;
     QSpinBox *m_testTimeout;
+    QSpinBox *m_testConcurrency;
+    QCheckBox *m_unifiedDelay;
+    QMap<QString, QString> m_nodeProviders;
+    QJsonObject m_providerProxyData;
     QTableWidget *m_profiles;
     QTableWidget *m_connections;
     QLineEdit *m_connectionSearch;
@@ -120,7 +124,7 @@ private:
     QMap<QString, QPair<QDateTime, int>> m_testResults;
     QMap<QString, QString> m_testErrors;
     QString m_testQuery;
-    int m_testTimeoutMs = 10000;
+    int m_testTimeoutMs = 5000;
     int m_activeTests = 0;
     int m_testPassed = 0;
     int m_testFailed = 0;

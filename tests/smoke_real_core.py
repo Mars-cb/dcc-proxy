@@ -55,7 +55,7 @@ def main():
         profile.write_text(config)
         settings = {"endpoint": "http://127.0.0.1:%d" % controller,
                     "secret": token, "core": str(Path(args.core).resolve()),
-                    "active": profile_id, "autoStart": False, "autoSystemProxy": False, "updateMinutes": 0}
+                    "active": "", "autoStart": False, "autoSystemProxy": False, "updateMinutes": 0}
         (root / "settings.json").write_text(json.dumps(settings))
         (root / "profiles.json").write_text(json.dumps({"profiles": [
             {"id": profile_id, "name": "integration fixture", "url": ""}]}))
@@ -105,9 +105,11 @@ def main():
                 if daemon.poll() is not None:
                     raise RuntimeError("Daemon exited before listening")
                 time.sleep(0.1)
-            result = command({"action": "start", "profile": profile_id})
+            result = command({"action": "start"})
             assert not result.get("error"), result
             assert result["running"], result
+            assert result["profile"] == profile_id, result
+            print("PASS first imported profile starts without a prior active selection")
             for _ in range(100):
                 try:
                     version = api("/version")
@@ -149,6 +151,16 @@ def main():
             assert command({"action": "status"})["pid"] == original_pid
             assert through_proxy() == b"dcc-proxy-real-core-ok"
             print("PASS invalid configuration preserves running core")
+            with socket.socket() as occupied:
+                occupied.bind(("127.0.0.1", 0))
+                occupied.listen(1)
+                blocked_port = occupied.getsockname()[1]
+                profile.write_text(config.replace("mixed-port: %d"%mixed, "mixed-port: %d"%blocked_port))
+                conflict = command({"action": "restart", "profile": profile_id})
+                assert conflict.get("error") and "已被其他程序占用" in conflict["error"], conflict
+                assert command({"action": "status"})["pid"] == original_pid
+                assert through_proxy() == b"dcc-proxy-real-core-ok"
+                print("PASS occupied port preserves running core and gives an actionable error")
             profile.write_text(config)
             api("/configs", "PATCH", {"mode": "direct"})
             assert api("/configs")["mode"] == "direct"

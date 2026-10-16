@@ -15,14 +15,14 @@ UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模�
 ```sh
 cd /data/work/dcc-proxy
 dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../dcc-proxy_0.1.0_$(dpkg --print-architecture).deb
+sudo dpkg -i ../dcc-proxy_0.1.1_$(dpkg --print-architecture).deb
 ```
 
 也可继续使用 CPack 脚本（产物位于 `dist/`）：
 
 ```sh
 ./tools/build-deb.sh
-sudo dpkg -i dist/dcc-proxy_0.1.0_$(dpkg --print-architecture).deb
+sudo dpkg -i dist/dcc-proxy_0.1.1_$(dpkg --print-architecture).deb
 ```
 
 两种方式共用 `tools/prepare-core.sh`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；
@@ -50,7 +50,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 1. 重新打开控制中心，进入“私人代理”。
 2. 在“订阅”顶部粘贴 URL，点击“URL 导入”，也可导入 Clash / Mihomo YAML 文件。
 3. 在“设置”确认内核路径和控制器地址，保存并连接。
-4. 选择订阅，点击“使用此配置”，等待内核启动。
+4. 首次导入后可直接点击“启动”；已有多个订阅时，选择订阅并点击“使用此配置”切换。
 5. 在“节点”选择策略组，点击节点卡片主体直接使用该节点；点击延迟或失败状态只测速，不切换节点。
 6. 启动成功后自动启用系统代理，浏览器可直接使用；停止时恢复原设置。TUN 仍按需开启，要求内核具有网络管理权限。
 
@@ -59,7 +59,10 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 图标使用内置 SVG，不依赖国旗字体；不能识别的节点使用地球图标，避免猜测位置。
 节点名较长时省略显示，悬停可查看完整原始名称和内核信息；切换请求始终使用原始名称。
 测速时对应卡片的勾选位置显示旋转进度环；整组测速逐节点回收结果，失败节点不会覆盖其他节点的成功结果。
-每个节点可设置 1–30 秒的测速超时。定时刷新只更新变化的数据，保留卡片、选中项和滚动位置。
+测速口径按 Clash Party v2.0.3：默认启用 `unified-delay`，由内核计算连接建立后的第二次 HTTP 请求延迟；界面显示内核原始返回值。
+默认超时 5000 ms、并发 50，均可调整并保存；测速地址优先使用手动设置，其次策略组 `url`，最后使用 `https://www.gstatic.com/generate_204`。
+Provider 节点使用对应健康检查接口。定时刷新只更新变化的数据，保留卡片、选中项和滚动位置。
+可调超时范围为 1–30000 ms，适配随包 Mihomo 的超时参数范围。
 
 URL 下载参考 Clash Party 的 User-Agent，支持重定向、订阅流量信息和更新周期。
 “订阅设置”可设置 User-Agent、Authorization、超时、更新周期和本地代理下载。
@@ -81,7 +84,9 @@ URL 下载参考 Clash Party 的 User-Agent，支持重定向、订阅流量信�
 
 后台通过当前用户专用 Unix socket 接受控制命令，插件退出不会结束后台。
 “启动内核时自动启用系统代理”默认开启，后台确认控制器和混合端口可用后才启用代理。
-“启动”“使用此配置”和重启内核都适用；启动验证失败时保留已有内核和代理设置。
+“启动”“使用此配置”和重启内核都适用；首次导入尚无启用记录时，启动会使用首个已导入订阅。
+启动前检查混合端口占用；与其他代理软件冲突时给出明确错误并保留现有内核。
+首次启动可能需要下载规则数据库，允许最多 120 秒配置准备时间；启动验证失败时保留已有内核和代理设置。
 只需要应用手动指定代理的用户，可在设置中取消该选项。
 默认手动启动：点击“启动”或“使用此配置”才启动内核，打开控制中心本身不会启动内核。
 勾选登录自启后由 systemd 用户服务在登录时启动；取消勾选不停止当前内核。

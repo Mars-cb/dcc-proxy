@@ -64,7 +64,7 @@ public:
             while (auto *socket = m_server.nextPendingConnection()) {
                 auto buffer = QSharedPointer<QByteArray>::create();
                 connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
-                QTimer::singleShot(25000, socket, [socket] { socket->disconnectFromServer(); });
+                QTimer::singleShot(145000, socket, [socket] { socket->disconnectFromServer(); });
                 connect(socket, &QLocalSocket::readyRead, this, [this, socket, buffer] {
                     buffer->append(socket->readAll());
                     if (buffer->size() > 65536) { socket->disconnectFromServer(); return; }
@@ -221,16 +221,34 @@ private:
         auto env = QProcessEnvironment::systemEnvironment();
         env.insert("SAFE_PATHS", dataDir());
         validator->setProcessEnvironment(env);
-        QTimer::singleShot(15000, validator, [validator] { if (validator->state() != QProcess::NotRunning) validator->kill(); });
+        QTimer::singleShot(120000, validator, [validator] { if (validator->state() != QProcess::NotRunning) validator->kill(); });
         auto complete = QSharedPointer<bool>::create(false);
         auto finish = [this, validator, complete, core, work, candidate, id, answer, env, recovery](bool success) {
             if (*complete) return;
             *complete = true;
             const auto output = QString::fromUtf8(validator->readAll()).right(2000);
             validator->deleteLater();
-            if (!success) { m_busy = false; m_error = output.isEmpty() ? "Core configuration validation failed" : output; answer({{"error", m_error}}); return; }
+            if (!success) {
+                m_busy = false;
+                m_error = output.isEmpty() ? "内核配置验证失败" : output;
+                if (validator->exitStatus() == QProcess::CrashExit && output.contains("download", Qt::CaseInsensitive))
+                    m_error += "\n首次启动下载规则数据库超时，请检查官方数据下载地址的网络连通性";
+                answer({{"error", m_error}}); return;
+            }
             try {
-                // Validate first, then replace the running process.
+                // Validate first, including ports, then replace the running process.
+                const auto config = parseConfig(readFile(candidate));
+                const int mixedPort = config["mixed-port"] ? config["mixed-port"].as<int>() : 0;
+                const bool ownsPort = m_core.state() == QProcess::Running && mixedPort == localProxyPort(m_store);
+                if (mixedPort > 0 && !ownsPort) {
+                    QTcpServer probe;
+                    if (!probe.listen(QHostAddress::LocalHost, quint16(mixedPort))) {
+                        m_busy = false;
+                        m_error = QString("混合端口 %1 已被其他程序占用，请更换 mixed-port 后重试").arg(mixedPort);
+                        answer({{"error", m_error}});
+                        return;
+                    }
+                }
                 writeFile(work + "/config.yaml", readFile(candidate));
                 stopCore(false);
                 m_profile = id;
@@ -263,6 +281,11 @@ private:
         if (action == "start" || action == "restart") {
             QString id = command["profile"].toString();
             if (id.isEmpty()) id = m_store.settings()["active"].toString();
+            if (id.isEmpty()) {
+                const auto profiles = m_store.profiles();
+                if (profiles.isEmpty()) throw std::runtime_error("请先导入订阅，再启动内核");
+                id = profiles.first().toObject()["id"].toString();
+            }
             startCore(id, answer); return;
         }
         if (action == "quit") { answer({{"ok", true}}); QTimer::singleShot(50, qApp, &QCoreApplication::quit); return; }
@@ -422,7 +445,8 @@ int main(int argc, char **argv)
             if (!connected) throw std::runtime_error(socket.errorString().toStdString());
             socket.write(QJsonDocument(QJsonObject{{"action", app.arguments()[i + 1]}}).toJson(QJsonDocument::Compact) + '\n');
             socket.waitForBytesWritten(1000);
-            if (!socket.waitForReadyRead(20000)) throw std::runtime_error(socket.errorString().toStdString());
+            const auto action = app.arguments()[i + 1];
+            if (!socket.waitForReadyRead(action == "start" || action == "restart" ? 140000 : 20000)) throw std::runtime_error(socket.errorString().toStdString());
             QTextStream(stdout) << socket.readAll();
             return 0;
         }

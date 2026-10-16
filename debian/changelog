@@ -1,3 +1,13 @@
+dcc-proxy (0.1.1) unstable; urgency=medium
+
+  * Match Clash Party unified delay, test URL selection, timeout and concurrency.
+  * Use provider-specific health checks and preserve incremental node updates.
+  * Start the first imported subscription when no active profile exists.
+  * Reject occupied mixed ports before replacing a working core.
+  * Allow initial geodata downloads to finish during configuration validation.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Fri, 16 Oct 2026 11:35:00 +0800
+
 dcc-proxy (0.1.0) unstable; urgency=medium
 
   * Package the native control center plugin and independent background service.

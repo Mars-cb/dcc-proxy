@@ -331,6 +331,8 @@ QByteArray Store::runtime(const QString &id) const
 {
     auto node = parseConfig(profile(id));
     const auto s = settings();
+    // Clash Party v2.0.3 controls unified-delay and enables it by default.
+    node["unified-delay"] = true;
     if (QFile::exists(m_root + "/controlled.yaml"))
         node = mergeYaml(node, parseConfig(readFile(m_root + "/controlled.yaml")));
     if (s.value("overrideEnabled").toBool(true) && QFile::exists(m_root + "/override.yaml"))

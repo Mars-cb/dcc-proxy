@@ -153,7 +153,8 @@ void serviceRequest(const QJsonObject &command, QObject *context, Api::Done done
         if (!doc.isObject()) { finish({}, QObject::tr("Invalid service response")); return; }
         finish(doc.object(), doc.object()["error"].toString());
     });
-    timer->start(20000);
+    const auto action = command["action"].toString();
+    timer->start(action == "start" || action == "restart" ? 140000 : 20000);
     socket->connectToServer(socketName());
 }
 void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPort, QObject *context, SubscriptionDone done)

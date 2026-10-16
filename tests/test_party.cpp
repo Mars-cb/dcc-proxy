@@ -20,6 +20,8 @@
 #include <QJSEngine>
 #include <QPlainTextEdit>
 #include <QCheckBox>
+#include <QSpinBox>
+#include <QUrlQuery>
 using namespace Party;
 class TestFrame : public DCC_NAMESPACE::FrameProxyInterface {
 public:
@@ -242,6 +244,11 @@ private slots:
         QCOMPARE(node["external-controller"].as<std::string>(), std::string("127.0.0.1:19090"));
         QCOMPARE(node["secret"].as<std::string>(), std::string("private-token"));
         QVERIFY(node["profile"]["store-selected"].as<bool>());
+        QVERIFY(node["unified-delay"].as<bool>());
+        store.saveProfile("test", {}, "unified-delay: false\n", id);
+        QVERIFY(parseConfig(store.runtime(id))["unified-delay"].as<bool>());
+        writeFile(d.path() + "/controlled.yaml", "unified-delay: false\n");
+        QVERIFY(!parseConfig(store.runtime(id))["unified-delay"].as<bool>());
     }
     void runtimeNodeDnsCompatibility()
     {
@@ -278,7 +285,8 @@ private slots:
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
         Store store; auto settings = store.settings();
         settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
-        int delayRequests = 0, groupRequests = 0, switchRequests = 0;
+        int delayRequests = 0, groupRequests = 0, switchRequests = 0, providerRequests = 0;
+        QStringList testedUrls; QList<int> testedTimeouts;
         connect(&server, &QTcpServer::newConnection, this, [&] {
             while (auto *s = server.nextPendingConnection()) {
                 auto buffer = QSharedPointer<QByteArray>::create();
@@ -289,15 +297,22 @@ private slots:
                     if (request.startsWith("PUT /proxies/")) ++switchRequests;
                     if (request.startsWith("GET /group/")) ++groupRequests;
                     QByteArray body = "{}", status = "200 OK"; int wait = 0;
-                    if (request.contains("/delay?")) {
+                    if (request.contains("/delay?") || request.contains("/healthcheck?")) {
                         ++delayRequests;
+                        if (request.contains("/healthcheck?")) ++providerRequests;
+                        const QUrlQuery query(QUrl::fromEncoded(request.split(' ').value(1)));
+                        testedUrls << query.queryItemValue("url", QUrl::FullyDecoded);
+                        testedTimeouts << query.queryItemValue("timeout").toInt();
                         if (request.contains(Api::segment("香港").toUtf8())) { wait = 900; status = "504 Gateway Timeout"; body = "{\"message\":\"context deadline exceeded\"}"; }
                         else { wait = 250; body = "{\"delay\":245}"; }
                     } else if (request.startsWith("GET /proxies ")) {
-                        QJsonObject proxies{{"组", QJsonObject{{"type", "Selector"}, {"all", QJsonArray{"日本", "香港"}}, {"now", "日本"}}},
+                        QJsonObject proxies{{"组", QJsonObject{{"type", "Selector"}, {"all", QJsonArray{"日本", "香港"}}, {"now", "日本"}, {"testUrl", "https://group.example/204"}}},
                             {"日本", QJsonObject{{"type", "Hysteria2"}, {"history", QJsonArray{QJsonObject{{"delay", 0}}}}}},
                             {"香港", QJsonObject{{"type", "Hysteria2"}, {"history", QJsonArray{QJsonObject{{"delay", 0}}}}}}};
                         body = QJsonDocument(QJsonObject{{"proxies", proxies}}).toJson(QJsonDocument::Compact);
+                    } else if (request.startsWith("GET /providers/proxies ")) {
+                        QJsonObject provider{{"proxies", QJsonArray{QJsonObject{{"name", "日本"}, {"type", "Hysteria2"}}}}};
+                        body = QJsonDocument(QJsonObject{{"providers", QJsonObject{{"订阅 /", provider}}}}).toJson(QJsonDocument::Compact);
                     } else if (request.startsWith("GET /configs ")) body = "{\"mode\":\"rule\"}";
                     QTimer::singleShot(wait, s, [s, body, status] {
                         s->write("HTTP/1.1 " + status + "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
@@ -312,6 +327,10 @@ private slots:
             auto *group = panel.findChild<QPushButton *>("test-proxy-group");
             auto *refresh = panel.findChild<QPushButton *>("refresh-proxy-panel");
             QVERIFY(nodes); QVERIFY(group); QVERIFY(refresh);
+            auto *testUrl = panel.findChild<QLineEdit *>("node-test-url");
+            QCOMPARE(panel.findChild<QSpinBox *>("node-test-timeout")->value(), 5000);
+            QCOMPARE(panel.findChild<QSpinBox *>("node-test-concurrency")->value(), 50);
+            QVERIFY(testUrl->text().isEmpty());
             QVERIFY(!panel.findChild<QPushButton *>("test-selected-node"));
             QVERIFY(!panel.findChild<QPushButton *>("select-node"));
             QTRY_COMPARE(nodes->count(), 2);
@@ -327,6 +346,9 @@ private slots:
             QTRY_VERIFY(!first->data(NodeTestingRole).toBool());
             QCOMPARE(first->data(NodeDelayRole).toInt(), 245);
             QVERIFY(first->data(NodeActiveRole).toBool()); QVERIFY(persistent.isValid()); QCOMPARE(nodes->item(0), first);
+            QCOMPARE(testedUrls.first(), QString("https://group.example/204"));
+            QCOMPARE(testedTimeouts.first(), 5000);
+            testUrl->setText("https://custom.example/204");
             QTest::mouseClick(group, Qt::LeftButton);
             QVERIFY(first->data(NodeTestingRole).toBool()); QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool());
             QTRY_VERIFY(!first->data(NodeTestingRole).toBool());
@@ -336,6 +358,9 @@ private slots:
             QCOMPARE(nodes->item(1)->data(NodeDelayRole).toInt(), 0);
             QVERIFY(nodes->item(1)->data(NodeTestErrorRole).toString().contains("deadline"));
             QCOMPARE(delayRequests, 3); QCOMPARE(groupRequests, 0);
+            QCOMPARE(providerRequests, 2);
+            QCOMPARE(testedUrls.last(), QString("https://custom.example/204"));
+            QCOMPARE(store.settings()["delayTestUrl"].toString(), QString("https://custom.example/204"));
             // Testing an unselected failed node must neither select it nor send a switch request.
             QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, qobject_cast<NodeList *>(nodes)->delayRect(nodes->item(1)).center());
             QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool());
