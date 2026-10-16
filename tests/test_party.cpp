@@ -202,6 +202,49 @@ private slots:
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
     }
+    void threeProxyModesApplyReadBackAndPersist()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        Store store; const auto id = store.saveProfile("Modes", {}, "mode: rule\nrules: [\"MATCH,DIRECT\"]\n");
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        auto settings = store.settings(); settings["active"] = id; settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+        QString current = "rule"; int patches = 0;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); const int end = buffer->indexOf("\r\n\r\n"); if (end < 0) return;
+                    const auto length = QRegularExpression("Content-Length: (\\d+)", QRegularExpression::CaseInsensitiveOption).match(QString::fromUtf8(buffer->left(end)));
+                    if (length.hasMatch() && buffer->size() < end + 4 + length.captured(1).toInt()) return;
+                    if (buffer->startsWith("PATCH /configs ")) {
+                        current = QJsonDocument::fromJson(buffer->mid(end + 4)).object()["mode"].toString(); ++patches;
+                    }
+                    const auto body = buffer->startsWith("GET /configs ") ? QJsonDocument(QJsonObject{{"mode", current}, {"mixed-port", 16666}}).toJson(QJsonDocument::Compact) : QByteArray("{}");
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                });
+            }
+        });
+        {
+            Panel panel; panel.show(); auto *combo = panel.findChild<QComboBox *>("proxy-mode"); QVERIFY(combo);
+            QTRY_VERIFY(panel.findChild<QLabel *>("overview-core")->text().contains("内核已连接"));
+            QTRY_VERIFY(combo->isEnabled()); QCOMPARE(combo->count(), 3);
+            for (const auto &pair : QList<QPair<QString, QString>>{{"规则", "rule"}, {"全局", "global"}, {"直连", "direct"}, {"规则", "rule"}, {"全局", "global"}}) {
+                const int index = combo->findText(pair.first); QVERIFY(index >= 0); QCOMPARE(combo->itemData(index).toString(), pair.second);
+                const int expected = patches + 1; combo->setCurrentIndex(index); QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, index));
+                QTRY_COMPARE(patches, expected); QCOMPARE(current, pair.second);
+                QTRY_VERIFY(QFile::exists(dir.path() + "/controlled.yaml"));
+                QTRY_COMPARE(QString::fromStdString(parseConfig(readFile(dir.path() + "/controlled.yaml"))["mode"].as<std::string>()), pair.second);
+                QCOMPARE(QString::fromStdString(parseConfig(store.runtime(id))["mode"].as<std::string>()), pair.second);
+                QTRY_COMPARE(combo->currentData().toString(), pair.second);
+            }
+            panel.hide();
+        }
+        {
+            Panel reopened; reopened.show(); auto *combo = reopened.findChild<QComboBox *>("proxy-mode");
+            QTRY_VERIFY(combo->isEnabled()); QTRY_COMPARE(combo->currentData().toString(), current); reopened.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void allApiPagesAndActions()
     {
         QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
