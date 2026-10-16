@@ -3,9 +3,26 @@
 #include <QResizeEvent>
 #include <QStyledItemDelegate>
 #include <QStyleOptionViewItem>
+#include <QMouseEvent>
 
 namespace Party {
 namespace {
+QString delayText(const QModelIndex &index)
+{
+    if (index.data(NodeTestingRole).toBool()) return QObject::tr("测速中");
+    const int delay = index.data(NodeDelayRole).toInt();
+    const auto error = index.data(NodeTestErrorRole).toString();
+    if (delay < 0) return QObject::tr("未测速");
+    if (delay > 0) return QString::number(delay) + " ms";
+    return error.isEmpty() || error.contains("timeout", Qt::CaseInsensitive) || error.contains("deadline", Qt::CaseInsensitive)
+        ? QObject::tr("超时") : QObject::tr("失败");
+}
+QRect statusRect(const QRect &itemRect, const QFont &font, const QModelIndex &index)
+{
+    const auto card = itemRect.adjusted(4, 4, -4, -4);
+    const int width = qMin(card.width() - 24, qMax(56, QFontMetrics(font).horizontalAdvance(delayText(index)) + 12));
+    return QRect(card.right() - 11 - width, card.top() + 40, width, 28);
+}
 class NodeDelegate : public QStyledItemDelegate {
 public:
     explicit NodeDelegate(QObject *parent) : QStyledItemDelegate(parent) {}
@@ -65,15 +82,13 @@ public:
         painter->setPen(secondary);
         const QRect detail(left, top + 32, card.width() - 24, 20);
         const int delay = index.data(NodeDelayRole).toInt();
-        const auto error = index.data(NodeTestErrorRole).toString();
-        const auto delayText = testing ? QObject::tr("测速中") : (delay < 0 ? QObject::tr("未测速") :
-            (delay == 0 ? (error.isEmpty() || error.contains("timeout", Qt::CaseInsensitive) || error.contains("deadline", Qt::CaseInsensitive) ? QObject::tr("超时") : QObject::tr("失败")) : QString::number(delay) + " ms"));
-        const int delayWidth = painter->fontMetrics().horizontalAdvance(delayText) + 12;
+        const auto text = delayText(index);
+        const int delayWidth = statusRect(option.rect, font, index).width();
         painter->drawText(detail.adjusted(0, 0, -delayWidth, 0), Qt::AlignLeft | Qt::AlignVCenter,
                           painter->fontMetrics().elidedText(index.data(NodeTypeRole).toString(), Qt::ElideRight, detail.width() - delayWidth));
         if (testing) painter->setPen(palette.color(QPalette::Highlight));
         else if (delay >= 0) painter->setPen(delay == 0 || delay > 500 ? QColor("#de645b") : (delay > 200 ? QColor("#c18725") : QColor("#21a675")));
-        painter->drawText(detail, Qt::AlignRight | Qt::AlignVCenter, delayText);
+        painter->drawText(detail, Qt::AlignRight | Qt::AlignVCenter, text);
         if ((option.state & QStyle::State_HasFocus) && selected) {
             painter->setBrush(Qt::NoBrush);
             painter->setPen(QPen(palette.color(QPalette::Highlight), 1, Qt::DotLine));
@@ -99,6 +114,7 @@ NodeList::NodeList(QWidget *parent) : QListWidget(parent)
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     setMouseTracking(true);
+    viewport()->setCursor(Qt::PointingHandCursor);
     setUniformItemSizes(false);
     setSpacing(0);
     setIconSize(QSize(28, 21));
@@ -121,6 +137,44 @@ void NodeList::syncAnimation()
 }
 void NodeList::showEvent(QShowEvent *event) { QListWidget::showEvent(event); syncAnimation(); }
 void NodeList::hideEvent(QHideEvent *event) { m_animation.stop(); QListWidget::hideEvent(event); }
+QRect NodeList::delayRect(const QListWidgetItem *item) const
+{
+    if (!item) return {};
+    auto font = item->font(); font.setBold(false);
+    return statusRect(visualItemRect(item), font, indexFromItem(item));
+}
+void NodeList::mousePressEvent(QMouseEvent *event)
+{
+    m_delayGesture = false; m_suppressRelease = false;
+    m_pressedDelay = QPersistentModelIndex();
+    if (event->button() == Qt::LeftButton) {
+        const auto *item = itemAt(event->pos());
+        if (item && delayRect(item).contains(event->pos())) {
+            m_delayGesture = true; m_pressedDelay = indexFromItem(item); event->accept(); return;
+        }
+    }
+    QListWidget::mousePressEvent(event);
+}
+void NodeList::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (m_suppressRelease) { m_suppressRelease = false; event->accept(); return; }
+    if (m_delayGesture) {
+        m_delayGesture = false;
+        const auto pressed = m_pressedDelay;
+        m_pressedDelay = QPersistentModelIndex();
+        const auto *item = itemAt(event->pos());
+        if (pressed.isValid() && event->button() == Qt::LeftButton && item && indexFromItem(item) == pressed && delayRect(item).contains(event->pos()))
+            emit delayClicked(item->data(Qt::UserRole).toString());
+        event->accept(); return;
+    }
+    QListWidget::mouseReleaseEvent(event);
+}
+void NodeList::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    const auto *item = itemAt(event->pos());
+    if (event->button() == Qt::LeftButton && item && delayRect(item).contains(event->pos())) { m_suppressRelease = true; event->accept(); return; }
+    QListWidget::mouseDoubleClickEvent(event);
+}
 void NodeList::resizeEvent(QResizeEvent *event)
 {
     QListWidget::resizeEvent(event);

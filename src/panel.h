@@ -43,7 +43,7 @@ private:
     void refreshProxies();
     void renderNodes();
     void selectNode();
-    void testNodes(bool group);
+    void testNodes(bool group, const QString &node = {});
     void runNodeTests();
     void reloadProfiles();
     void editProfile(bool create);
@@ -81,8 +81,6 @@ private:
     QComboBox *m_sort;
     QCheckBox *m_hideUnavailable;
     NodeList *m_nodes;
-    QPushButton *m_select;
-    QPushButton *m_testNode;
     QPushButton *m_testGroup;
     QLineEdit *m_testUrl;
     QSpinBox *m_testTimeout;

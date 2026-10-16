@@ -90,6 +90,7 @@ Panel::Panel(QWidget *parent) : QWidget(parent), m_api(this), m_download(this)
     button(tr("刷新"), header, this, [this] { refresh(); })->setObjectName("refresh-proxy-panel");
     layout->addLayout(header);
     m_status = new QLabel(tr("尚未连接内核，请导入配置并启动，或在设置中连接现有内核。"));
+    m_status->setObjectName("proxy-status");
     m_status->setWordWrap(true);
     m_status->setTextFormat(Qt::PlainText);
     m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -132,7 +133,7 @@ Panel::Panel(QWidget *parent) : QWidget(parent), m_api(this), m_download(this)
     connect(&m_api, &Api::configurationChanged, this, [this] {
         ++m_testEpoch; m_testing.clear(); m_testQueue.clear(); m_activeTests = 0;
         m_testResults.clear(); m_testErrors.clear();
-        m_testNode->setEnabled(true); m_testGroup->setEnabled(true); renderNodes();
+        m_testGroup->setEnabled(true); renderNodes();
     });
     loadSettings();
     reloadProfiles();
@@ -209,11 +210,9 @@ QWidget *Panel::proxiesPage()
     auto *test = new QHBoxLayout;
     m_testUrl = new QLineEdit("https://www.gstatic.com/generate_204"); m_testUrl->setObjectName("node-test-url"); test->addWidget(m_testUrl, 1);
     m_testTimeout = new QSpinBox; m_testTimeout->setRange(1, 30); m_testTimeout->setValue(10); m_testTimeout->setSuffix(tr(" 秒")); m_testTimeout->setToolTip(tr("每个节点的测速超时")); test->addWidget(m_testTimeout);
-    m_testNode = button(tr("测选中节点"), test, this, [this] { testNodes(false); }); m_testNode->setObjectName("test-selected-node");
     m_testGroup = button(tr("测整个策略组"), test, this, [this] { testNodes(true); }); m_testGroup->setObjectName("test-proxy-group");
     layout->addLayout(test);
     auto *actions = new QHBoxLayout;
-    m_select = button(tr("使用选中节点"), actions, this, [this] { selectNode(); }); m_select->setObjectName("select-node");
     button(tr("恢复自动选择"), actions, this, [this] {
         const QString group = m_group->currentData().toString();
         if (group.isEmpty()) return;
@@ -226,7 +225,9 @@ QWidget *Panel::proxiesPage()
     connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { renderNodes(); });
     connect(m_sort, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] { renderNodes(); });
     connect(m_hideUnavailable, &QCheckBox::toggled, this, [this] { renderNodes(); });
-    connect(m_nodes, &QListWidget::itemDoubleClicked, this, [this] { selectNode(); });
+    connect(m_nodes, &QListWidget::itemClicked, this, [this] { selectNode(); });
+    connect(m_nodes, &QListWidget::itemActivated, this, [this] { selectNode(); });
+    connect(m_nodes, &NodeList::delayClicked, this, [this](const QString &name) { testNodes(false, name); });
     return page;
 }
 void Panel::refreshProxies()
@@ -235,7 +236,7 @@ void Panel::refreshProxies()
     m_reads.insert("proxies");
     m_api.get("/proxies", [this](const QJsonValue &value, const QString &error) {
         m_reads.remove("proxies");
-        if (!error.isEmpty()) { m_connected = false; m_select->setEnabled(false); message(error, true); return; }
+        if (!error.isEmpty()) { m_connected = false; message(error, true); return; }
         m_proxyData = value.toObject()["proxies"].toObject();
         const auto current = m_group->currentData().toString();
         QSignalBlocker block(m_group);
@@ -305,7 +306,7 @@ void Panel::renderNodes()
         item->setData(NodeDisplayNameRole, nodeDisplayName(node.name));
         item->setData(NodeTestingRole, testing);
         item->setData(NodeTestErrorRole, m_testErrors.value(node.name));
-        item->setToolTip(QString::fromUtf8(QJsonDocument(node.info).toJson()) + m_testErrors.value(node.name));
+        item->setToolTip(node.name + "\n" + tr("点击卡片使用节点；点击延迟或状态测速。") + (m_testErrors.value(node.name).isEmpty() ? QString() : "\n" + m_testErrors.value(node.name)));
         auto font = item->font(); font.setBold(active); item->setFont(font);
         if (!sameNodes && (node.name == selectedName || (selectedName.isEmpty() && active))) m_nodes->setCurrentItem(item);
     }
@@ -313,15 +314,15 @@ void Panel::renderNodes()
         m_nodes->doItemsLayout(); m_nodes->verticalScrollBar()->setValue(scroll); m_nodes->setUpdatesEnabled(true);
     }
     m_nodes->syncAnimation();
-    const QString type = group["type"].toString();
-    m_select->setEnabled(m_connected && !m_selecting && type != "LoadBalance" && group["all"].isArray());
 }
 void Panel::selectNode()
 {
-    if (!m_connected || m_selecting || !m_nodes->currentItem() || !m_select->isEnabled()) return;
+    if (!m_connected || m_selecting || !m_nodes->currentItem()) return;
     const auto name = m_nodes->currentItem()->data(Qt::UserRole).toString();
     const auto group = m_group->currentData().toString();
-    m_selecting = true; m_select->setEnabled(false);
+    const auto info = m_proxyData[group].toObject();
+    if (info["type"].toString() == "LoadBalance" || !info["all"].isArray() || info["now"].toString() == name) return;
+    m_selecting = true;
     m_api.request("PUT", "/proxies/" + Api::segment(group), {{"name", name}}, [this, group, name](const QJsonValue &, const QString &error) {
         m_selecting = false;
         if (!error.isEmpty()) { message(tr("节点切换失败：%1").arg(error), true); renderNodes(); return; }
@@ -329,14 +330,14 @@ void Panel::selectNode()
         refreshProxies();
     });
 }
-void Panel::testNodes(bool all)
+void Panel::testNodes(bool all, const QString &node)
 {
     if (!m_connected || !m_testing.isEmpty()) return;
     const QUrl testUrl(m_testUrl->text());
     if (testUrl.scheme() != "https" && testUrl.scheme() != "http") { message(tr("请输入 HTTP 或 HTTPS 测试地址"), true); return; }
     QStringList names;
     if (all) for (const auto &v : m_proxyData[m_group->currentData().toString()].toObject()["all"].toArray()) names << v.toString();
-    else if (m_nodes->currentItem()) names << m_nodes->currentItem()->data(Qt::UserRole).toString();
+    else if (!node.isEmpty()) names << node;
     names.removeDuplicates();
     if (names.isEmpty()) return;
     ++m_testEpoch;
@@ -345,7 +346,7 @@ void Panel::testNodes(bool all)
     QUrlQuery query; query.addQueryItem("url", testUrl.toString()); query.addQueryItem("timeout", QString::number(m_testTimeoutMs));
     m_testQuery = query.toString(QUrl::FullyEncoded);
     for (const auto &name : names) { m_testing.insert(name); m_testQueue.enqueue(name); m_testErrors.remove(name); }
-    m_testNode->setEnabled(false); m_testGroup->setEnabled(false);
+    m_testGroup->setEnabled(false);
     message(tr("正在测速 %1 个节点…").arg(names.size()));
     renderNodes(); runNodeTests();
 }
@@ -366,7 +367,7 @@ void Panel::runNodeTests()
             if (delay > 0) ++m_testPassed; else ++m_testFailed;
             renderNodes();
             if (m_testing.isEmpty()) {
-                m_testNode->setEnabled(true); m_testGroup->setEnabled(true);
+                m_testGroup->setEnabled(true);
                 message(tr("测速完成：%1 个成功，%2 个失败").arg(m_testPassed).arg(m_testFailed), m_testPassed == 0);
                 refreshProxies();
             } else runNodeTests();
@@ -812,7 +813,7 @@ void Panel::refresh()
         m_polling = false; m_connected = error.isEmpty();
         if (m_connected && !wasConnected) message(tr("已连接代理内核"));
         if (!m_connected) {
-            m_overview->setText(tr("控制器连接失败：%1").arg(error)); m_select->setEnabled(false); m_tun->setEnabled(false); m_mode->setEnabled(false);
+            m_overview->setText(tr("控制器连接失败：%1").arg(error)); m_tun->setEnabled(false); m_mode->setEnabled(false);
             serviceRequest({{"action", "status"}}, this, [this](const QJsonValue &state, const QString &serviceError) {
                 if (m_connected) return;
                 if (!serviceError.isEmpty()) { m_overview->setText(tr("后台未启动。请导入订阅并点击“使用此配置”或“启动”。")); return; }

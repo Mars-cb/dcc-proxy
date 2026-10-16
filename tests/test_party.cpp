@@ -16,12 +16,14 @@
 #include <QLineEdit>
 #include <QTableWidget>
 #include <QPersistentModelIndex>
+#include <QLabel>
 using namespace Party;
 class TestFrame : public DCC_NAMESPACE::FrameProxyInterface {
 public:
     QWidget host;
     QPointer<QWidget> page;
-    void pushWidget(DCC_NAMESPACE::ModuleInterface *const, QWidget *const w, PushType) override { page = w; w->setParent(&host); w->show(); }
+    int pushes = 0;
+    void pushWidget(DCC_NAMESPACE::ModuleInterface *const, QWidget *const w, PushType) override { ++pushes; page = w; w->setParent(&host); w->show(); }
     void popWidget(DCC_NAMESPACE::ModuleInterface *const) override { if (page) { page->setParent(nullptr); page->hide(); page->deleteLater(); page = nullptr; } }
     void setModuleVisible(DCC_NAMESPACE::ModuleInterface *const, const bool) override {}
     void showModulePage(const QString &, const QString &, bool) override {}
@@ -49,6 +51,7 @@ private slots:
         plugin.active();
         QPointer<QWidget> retired = plugin.moduleWidget();
         QVERIFY(retired);
+        plugin.load("Proxies"); QCOMPARE(plugin.moduleWidget(), retired.data()); QCOMPARE(frame.pushes, 1);
         frame.popWidget(&plugin);
         QVERIFY(retired); // deleteLater has deliberately not run yet.
         QCOMPARE(plugin.load("Proxies"), 0);
@@ -203,7 +206,7 @@ private slots:
         QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
         Store store; auto settings = store.settings();
         settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
-        int delayRequests = 0, groupRequests = 0;
+        int delayRequests = 0, groupRequests = 0, switchRequests = 0;
         connect(&server, &QTcpServer::newConnection, this, [&] {
             while (auto *s = server.nextPendingConnection()) {
                 auto buffer = QSharedPointer<QByteArray>::create();
@@ -211,6 +214,7 @@ private slots:
                 connect(s, &QTcpSocket::readyRead, s, [&, s, buffer] {
                     *buffer += s->readAll(); if (!buffer->contains("\r\n\r\n")) return;
                     const auto request = *buffer; buffer->clear();
+                    if (request.startsWith("PUT /proxies/")) ++switchRequests;
                     if (request.startsWith("GET /group/")) ++groupRequests;
                     QByteArray body = "{}", status = "200 OK"; int wait = 0;
                     if (request.contains("/delay?")) {
@@ -233,14 +237,17 @@ private slots:
         {
             Panel panel; panel.resize(900, 650); panel.show(); panel.openPage("Proxies");
             auto *nodes = panel.findChild<QListWidget *>("proxy-nodes");
-            auto *single = panel.findChild<QPushButton *>("test-selected-node");
             auto *group = panel.findChild<QPushButton *>("test-proxy-group");
             auto *refresh = panel.findChild<QPushButton *>("refresh-proxy-panel");
-            QVERIFY(nodes); QVERIFY(single); QVERIFY(group); QVERIFY(refresh);
-            QTRY_COMPARE(nodes->count(), 2); QTRY_VERIFY(panel.findChild<QPushButton *>("select-node")->isEnabled());
+            QVERIFY(nodes); QVERIFY(group); QVERIFY(refresh);
+            QVERIFY(!panel.findChild<QPushButton *>("test-selected-node"));
+            QVERIFY(!panel.findChild<QPushButton *>("select-node"));
+            QTRY_COMPARE(nodes->count(), 2);
+            QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("已连接"));
             QPersistentModelIndex persistent(nodes->model()->index(0, 0));
             auto *first = nodes->item(0);
-            nodes->setCurrentRow(0); QTest::mouseClick(single, Qt::LeftButton);
+            nodes->setCurrentRow(0);
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, qobject_cast<NodeList *>(nodes)->delayRect(first).center());
             QVERIFY(first->data(NodeTestingRole).toBool()); QVERIFY(!nodes->item(1)->data(NodeTestingRole).toBool());
             const auto angle = nodes->property("node-spinner-angle").toInt();
             QTRY_VERIFY(nodes->property("node-spinner-angle").toInt() != angle);
@@ -257,6 +264,12 @@ private slots:
             QCOMPARE(nodes->item(1)->data(NodeDelayRole).toInt(), 0);
             QVERIFY(nodes->item(1)->data(NodeTestErrorRole).toString().contains("deadline"));
             QCOMPARE(delayRequests, 3); QCOMPARE(groupRequests, 0);
+            // Testing an unselected failed node must neither select it nor send a switch request.
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, qobject_cast<NodeList *>(nodes)->delayRect(nodes->item(1)).center());
+            QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool());
+            QCOMPARE(nodes->currentRow(), 0); QVERIFY(first->data(NodeActiveRole).toBool());
+            QTRY_VERIFY(!nodes->item(1)->data(NodeTestingRole).toBool());
+            QCOMPARE(nodes->currentRow(), 0); QCOMPARE(switchRequests, 0); QCOMPARE(delayRequests, 4);
             QTest::mouseClick(refresh, Qt::LeftButton); QTest::qWait(80);
             QVERIFY(persistent.isValid()); QCOMPARE(nodes->item(0), first); QCOMPARE(first->data(NodeDelayRole).toInt(), 245);
             panel.hide();
@@ -326,9 +339,9 @@ private slots:
         {
             Panel panel; panel.resize(900, 650); panel.show(); panel.openPage("Proxies");
             auto *nodes = panel.findChild<QListWidget *>("proxy-nodes");
-            auto *select = panel.findChild<QPushButton *>("select-node");
-            QVERIFY(nodes); QVERIFY(select);
-            QTRY_COMPARE(nodes->count(), 2); QTRY_VERIFY(select->isEnabled());
+            QVERIFY(nodes);
+            QTRY_COMPARE(nodes->count(), 2);
+            QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("已连接"));
             QVERIFY(!nodes->item(0)->icon().pixmap(28, 21).isNull());
             QCOMPARE(nodes->viewMode(), QListView::IconMode);
             QTRY_COMPARE(nodes->visualItemRect(nodes->item(0)).top(), nodes->visualItemRect(nodes->item(1)).top());
@@ -337,11 +350,13 @@ private slots:
             panel.resize(530, 650);
             QTRY_VERIFY(nodes->gridSize().width() != wideGrid);
             QTRY_COMPARE(nodes->visualItemRect(nodes->item(0)).top(), nodes->visualItemRect(nodes->item(1)).top());
-            nodes->setCurrentRow(1); QTest::mouseClick(select, Qt::LeftButton);
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->visualItemRect(nodes->item(1)).topLeft() + QPoint(50, 24));
             QTRY_COMPARE(now, QString("REJECT"));
             QTRY_VERIFY(nodes->item(1)->text().startsWith(QString::fromUtf8("✓")));
-            failSwitch = true; nodes->setCurrentRow(0); QTest::mouseClick(select, Qt::LeftButton);
-            QTRY_COMPARE(switches, 2); QTRY_VERIFY(select->isEnabled());
+            failSwitch = true;
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->visualItemRect(nodes->item(0)).topLeft() + QPoint(50, 24));
+            QTRY_COMPARE(switches, 2);
+            QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("切换失败"));
             QCOMPARE(now, QString("REJECT"));
             QVERIFY(nodes->item(1)->text().startsWith(QString::fromUtf8("✓")));
             QVERIFY(!QIcon(":/dcc-proxy/proxy.svg").pixmap(42, 42).isNull());

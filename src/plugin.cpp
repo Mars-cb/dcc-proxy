@@ -19,6 +19,7 @@ QStringList ProxyPlugin::availPage() const
 QWidget *ProxyPlugin::moduleWidget() { return m_panel; }
 void ProxyPlugin::active()
 {
+    if (m_panel && m_panel->parentWidget()) return;
     // The host removes pages with deleteLater() before calling load()/active().
     // A non-null QPointer can still refer to that retired page in this event loop.
     try { m_panel = new Party::Panel; }
