@@ -778,7 +778,7 @@ void Panel::editProfile(bool create)
     guarded([&] {
         const auto name = create ? QInputDialog::getText(this, tr("新建配置"), tr("名称")) : p["name"].toString();
         if (name.isEmpty()) return;
-        const auto data = create ? QByteArray("mixed-port: 17890\nmode: rule\nlog-level: info\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n") : m_store.profile(p["id"].toString());
+        const auto data = create ? QByteArray("mixed-port: 16666\nmode: rule\nlog-level: info\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n") : m_store.profile(p["id"].toString());
         editDocument(name, data, [this, p, name](QByteArray text) {
             const auto id = m_store.saveProfile(name, p["url"].toString(), text, p["id"].toString()); reloadProfiles(); showProfileNodes(id); message(tr("已保存；使用此配置后生效"));
         });
@@ -918,7 +918,7 @@ QWidget *Panel::overridePage()
     m_overrideEnabled = new QCheckBox(tr("启用 YAML 覆写")); m_overrideEnabled->setToolTip(tr("映射递归合并，列表整体替换，null 删除字段")); layout->addWidget(m_overrideEnabled);
     auto *help = new QLabel(tr("YAML 覆写会合并到订阅配置：同名映射递归合并，列表整体替换，null 删除字段。例：hosts 添加域名到 IP 的映射；dns.nameserver 替换 DNS 列表；allow-lan: false 禁止局域网接入。节点和 rules 列表只在明确需要整体替换时填写。保存后重启内核生效。"));
     help->setObjectName("yaml-override-help"); help->setWordWrap(true); help->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); layout->addWidget(help);
-    m_yamlOverride = new QPlainTextEdit; m_yamlOverride->setObjectName("yaml-override-editor"); m_yamlOverride->setPlaceholderText("mixed-port: 17890\nallow-lan: false"); layout->addWidget(m_yamlOverride, 1);
+    m_yamlOverride = new QPlainTextEdit; m_yamlOverride->setObjectName("yaml-override-editor"); m_yamlOverride->setPlaceholderText("mixed-port: 16666\nallow-lan: false"); layout->addWidget(m_yamlOverride, 1);
     m_scriptEnabled = new QCheckBox(tr("启用 JavaScript 覆写")); m_scriptEnabled->setToolTip(tr("隔离执行，限时 4 秒")); layout->addWidget(m_scriptEnabled);
     m_jsOverride = new QPlainTextEdit; m_jsOverride->setObjectName("javascript-override-editor"); m_jsOverride->setPlaceholderText("function main(config) {\n  return config;\n}"); layout->addWidget(m_jsOverride, 1);
     auto *row = new QHBoxLayout;
@@ -960,7 +960,7 @@ QWidget *Panel::settingsPage()
         auto *spin = new QSpinBox; spin->setObjectName("proxy-" + key);
         spin->setRange(key == "mixed-port" ? 1 : 0, 65535);
         if (key != "mixed-port") spin->setSpecialValueText(tr("关闭"));
-        spin->setValue(key == "mixed-port" ? 17890 : 0);
+        spin->setValue(key == "mixed-port" ? 16666 : 0);
         m_proxyPorts.insert(key, spin); form->addRow(portLabels[key], spin);
     }
     m_applyPorts = new QPushButton(tr("保存并应用端口")); m_applyPorts->setObjectName("apply-proxy-ports");
@@ -1081,7 +1081,7 @@ void Panel::loadPortSettings()
         if (QFile::exists(path)) config = mergeYaml(config, parseConfig(readFile(path)));
         for (auto it = m_proxyPorts.begin(); it != m_proxyPorts.end(); ++it) {
             const auto value = config[it.key().toStdString()];
-            it.value()->setValue(value ? value.as<int>() : (it.key() == "mixed-port" ? 17890 : 0));
+            it.value()->setValue(value ? value.as<int>() : (it.key() == "mixed-port" ? 16666 : 0));
         }
     });
 }

@@ -1,3 +1,11 @@
+dcc-proxy (0.1.6) unstable; urgency=medium
+
+  * Set the default controller port to 19999 and mixed proxy port to 16666.
+  * Update new/imported profile defaults, UI hints and regression expectations.
+  * Preserve explicitly configured ports until changed by the user.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Fri, 16 Oct 2026 16:30:00 +0800
+
 dcc-proxy (0.1.5) unstable; urgency=medium
 
   * Support Array.includes in JavaScript overrides on the system Qt 5.11 engine.

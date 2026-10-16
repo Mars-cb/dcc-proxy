@@ -174,7 +174,7 @@ QByteArray normalizeSubscription(const QByteArray &data)
     }
     if (proxies.size() == 0) fail("Subscription contains no supported nodes");
     YAML::Node config;
-    config["mixed-port"] = 17890; config["mode"] = "rule"; config["log-level"] = "info"; config["allow-lan"] = false;
+    config["mixed-port"] = 16666; config["mode"] = "rule"; config["log-level"] = "info"; config["allow-lan"] = false;
     config["proxies"] = proxies;
     YAML::Node automatic;
     automatic["name"] = "自动选择"; automatic["type"] = "url-test"; automatic["url"] = "https://www.gstatic.com/generate_204"; automatic["interval"] = 300; automatic["proxies"] = names;
@@ -259,7 +259,7 @@ Store::Store(QString root) : m_root(std::move(root))
 QJsonObject Store::settings() const
 {
     auto out = readJson(m_root + "/settings.json");
-    if (!out.contains("endpoint")) out["endpoint"] = "http://127.0.0.1:19090";
+    if (!out.contains("endpoint")) out["endpoint"] = "http://127.0.0.1:19999";
     if (!out.contains("core")) {
         QString core = QFile::exists("/usr/lib/dcc-proxy/mihomo") ? "/usr/lib/dcc-proxy/mihomo" : QStandardPaths::findExecutable("mihomo");
         if (core.isEmpty() && QFile::exists("/opt/clash-party/resources/sidecar/mihomo")) core = "/opt/clash-party/resources/sidecar/mihomo";
@@ -348,7 +348,7 @@ QByteArray Store::runtime(const QString &id) const
     auto node = parseConfig(profile(id));
     const auto s = settings();
     // Full YAML subscriptions can omit application listener settings.
-    if (!node["mixed-port"]) node["mixed-port"] = 17890;
+    if (!node["mixed-port"]) node["mixed-port"] = 16666;
     // Base geodata is supplied offline; updates remain an explicit user action.
     node["geo-auto-update"] = false;
     if (!node["global-ua"]) node["global-ua"] = "Mozilla/5.0";
@@ -399,7 +399,7 @@ QByteArray Store::runtime(const QString &id) const
     const QUrl url(s["endpoint"].toString());
     const QString host = url.host();
     if (host != "127.0.0.1" && host != "localhost" && host != "::1") fail("Managed core controller must use a loopback address");
-    node["external-controller"] = (host == "::1" ? "[::1]" : host).toStdString() + ":" + std::to_string(url.port(19090));
+    node["external-controller"] = (host == "::1" ? "[::1]" : host).toStdString() + ":" + std::to_string(url.port(19999));
     node["secret"] = s["secret"].toString().toStdString();
     node["external-controller-cors"].remove("allow-private-network");
     node.remove("external-controller-unix");

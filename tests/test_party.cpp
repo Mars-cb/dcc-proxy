@@ -152,7 +152,7 @@ private slots:
     void proxyPortsRuntimeAndValidation()
     {
         QTemporaryDir dir; Store store(dir.path());
-        const auto id = store.saveProfile("Fixture", {}, "mixed-port: 17890\nport: 17891\nsocks-port: 17892\nrules: [\"MATCH,DIRECT\"]\n");
+        const auto id = store.saveProfile("Fixture", {}, "mixed-port: 16666\nport: 17891\nsocks-port: 17892\nrules: [\"MATCH,DIRECT\"]\n");
         writeFile(dir.path() + "/controlled.yaml", "mixed-port: 27890\nport: 27891\nsocks-port: 0\n");
         writeFile(dir.path() + "/override.yaml", "mixed-port: 37890\nport: 37891\n");
         writeFile(dir.path() + "/override.js", "function main(c) { c['mixed-port'] = 47890; return c; }");
@@ -163,7 +163,7 @@ private slots:
         QCOMPARE(config["socks-port"].as<int>(), 0);
         QCOMPARE(validateProxyPorts({{"mixed-port", 27890}, {"port", 0}})["mixed-port"].toInt(), 27890);
         for (const auto &ports : QList<QJsonObject>{{}, {{"mixed-port", 0}}, {{"port", -1}}, {{"port", 65536}},
-            {{"port", 1.5}}, {{"port", "17890"}}, {{"unknown", 8}}, {{"mixed-port", 8}, {"port", 8}}})
+            {{"port", 1.5}}, {{"port", "16666"}}, {{"unknown", 8}}, {{"mixed-port", 8}, {"port", 8}}})
             QVERIFY_EXCEPTION_THROWN(validateProxyPorts(ports), std::runtime_error);
     }
     void proxyPortsUiSavesAndRestores()
@@ -216,7 +216,7 @@ private slots:
                     const auto match = QRegularExpression("Content-Length: (\\d+)", QRegularExpression::CaseInsensitiveOption).match(QString::fromUtf8(buffer->left(end)));
                     if (match.hasMatch() && buffer->size() < end + 4 + match.captured(1).toInt()) return;
                     requests.append(*buffer); QByteArray body = "{}";
-                    if (buffer->startsWith("GET /configs ")) body = R"({"mixed-port":17890,"mode":"rule"})";
+                    if (buffer->startsWith("GET /configs ")) body = R"({"mixed-port":16666,"mode":"rule"})";
                     if (buffer->startsWith("GET /connections ")) body = R"({"connections":[{"id":"connection-1","metadata":{"host":"fixture.test","destinationPort":"80","network":"tcp"}}],"uploadTotal":1,"downloadTotal":2,"memory":3})";
                     if (buffer->startsWith("GET /rules ")) body = R"({"rules":[{"type":"Domain","payload":"fixture.test","proxy":"DIRECT","extra":{"disabled":false}}]})";
                     if (buffer->startsWith("GET /providers/proxies ")) body = R"({"providers":{"fixture /?#":{"vehicleType":"HTTP","proxies":[{"name":"DIRECT"}]}}})";
@@ -331,7 +331,7 @@ private slots:
                 QVERIFY(click(section.toUpper())); QVERIFY2(!help.isEmpty(), qPrintable(section)); QVERIFY(!example.isEmpty());
                 QVERIFY(parseConfig(example)[section.toStdString()]); QCOMPARE(store.profile(id), original);
                 const auto exampleFile = dir.path() + "/example.yaml";
-                auto config = parseConfig(example); config["mixed-port"] = 17890; config["rules"].push_back("MATCH,DIRECT");
+                auto config = parseConfig(example); config["mixed-port"] = 16666; config["rules"].push_back("MATCH,DIRECT");
                 writeFile(exampleFile, emitYaml(config));
                 if (!testCore().isEmpty()) {
                     QProcess validator; validator.start(testCore(), {"-t", "-d", dir.path(), "-f", exampleFile});
@@ -408,7 +408,7 @@ private slots:
     void clashTunDefaultsAndRuntime()
     {
         QTemporaryDir dir; Store store(dir.path());
-        const auto id = store.saveProfile("TUN fixture", {}, "mixed-port: 17890\ntun: {enable: true, stack: system}\ndns: {enable: false}\nrules: [\"MATCH,DIRECT\"]\n");
+        const auto id = store.saveProfile("TUN fixture", {}, "mixed-port: 16666\ntun: {enable: true, stack: system}\ndns: {enable: false}\nrules: [\"MATCH,DIRECT\"]\n");
         auto config = parseConfig(store.runtime(id));
         QVERIFY(!config["tun"]["enable"].as<bool>());
         QCOMPARE(config["tun"]["stack"].as<std::string>(), std::string("mixed"));
@@ -456,7 +456,7 @@ private slots:
                 connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
                 connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
                     const auto request = socket->readAll(); QByteArray body = "{}"; int delay = 0;
-                    if (request.startsWith("GET /configs ")) body = "{\"mode\":\"rule\",\"mixed-port\":17890}";
+                    if (request.startsWith("GET /configs ")) body = "{\"mode\":\"rule\",\"mixed-port\":16666}";
                     if (request.startsWith("GET /connections ")) { ++connections; delay = 160; body = "{\"connections\":[{\"id\":\"fixture\"}],\"uploadTotal\":1024,\"downloadTotal\":2048,\"memory\":4096}"; }
                     QTimer::singleShot(delay, socket, [socket, body] { socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost(); });
                 });
@@ -467,7 +467,7 @@ private slots:
             Panel panel; panel.resize(900, 700); panel.show();
             auto *control = panel.findChild<Dtk::Widget::DSwitchButton *>("core-switch"); QVERIFY(control);
             auto *core = panel.findChild<QLabel *>("overview-core"); auto *stats = panel.findChild<QLabel *>("overview-statistics"); QVERIFY(core); QVERIFY(stats);
-            QTRY_VERIFY(core->text().contains("17890")); QTRY_VERIFY(stats->text().contains("连接 1")); QTRY_VERIFY(control->isChecked());
+            QTRY_VERIFY(core->text().contains("16666")); QTRY_VERIFY(stats->text().contains("连接 1")); QTRY_VERIFY(control->isChecked());
             const auto coreText = core->text(); const auto statsText = stats->text(); const auto statsPosition = stats->pos();
             auto *refresh = panel.findChild<QPushButton *>("refresh-proxy-panel"); QVERIFY(refresh);
             for (int i = 0; i < 3; ++i) {
@@ -503,7 +503,7 @@ private slots:
     void bypassPacRoutes()
     {
         QJSEngine js;
-        auto source = proxyPac(17890, defaultProxyBypass() + QStringList{"*.example.com", "exact.test", "fc00::/7", "2001:db8::/32"});
+        auto source = proxyPac(16666, defaultProxyBypass() + QStringList{"*.example.com", "exact.test", "fc00::/7", "2001:db8::/32"});
         QVERIFY(!js.evaluate(QString::fromUtf8(source)).isError());
         js.evaluate("function dnsResolve(host) { return host==='intranet.test' ? '10.20.8.220' : '203.0.113.8'; }");
         auto route = [&](const QString &host) {
@@ -512,10 +512,10 @@ private slots:
         for (const auto &host : {"localhost", "127.99.1.2", "192.168.8.1", "10.20.8.220", "172.16.0.1", "172.31.255.255", "[::1]", "fc00::1", "fdff:ffff::99", "2001:db8:1234::1", "x.EXAMPLE.com.", "exact.test", "intranet.test"})
             QCOMPARE(route(host), QString("DIRECT"));
         for (const auto &host : {"172.32.0.1", "192.169.0.1", "example.com", "badexample.com", "exact.test.evil", "2001:db9::1", "fe80::1", "public.test"})
-            QVERIFY2(route(host).startsWith("PROXY 127.0.0.1:17890;"), host);
+            QVERIFY2(route(host).startsWith("PROXY 127.0.0.1:16666;"), host);
         js.evaluate("function dnsResolveEx(host) { return '2001:db8::7; 203.0.113.8'; }");
         QCOMPARE(route("ipv6-intranet.test"), QString("DIRECT"));
-        QVERIFY(!js.evaluate(QString::fromUtf8(proxyPac(17890, {}))).isError());
+        QVERIFY(!js.evaluate(QString::fromUtf8(proxyPac(16666, {}))).isError());
         QVERIFY(route("localhost").startsWith("PROXY")); // Explicit empty list disables bypass.
         QVERIFY(route("10.20.8.220").startsWith("PROXY"));
     }
@@ -587,9 +587,9 @@ private slots:
     void profileRoundTrip()
     {
         QTemporaryDir dir; Store store(dir.path());
-        const auto id = store.saveProfile("日本", "https://example.com/sub", "mixed-port: 17890\nproxies: []\nrules: [\"MATCH,DIRECT\"]\n");
+        const auto id = store.saveProfile("日本", "https://example.com/sub", "mixed-port: 16666\nproxies: []\nrules: [\"MATCH,DIRECT\"]\n");
         QVERIFY(validId(id)); QCOMPARE(store.profiles().size(), 1);
-        QVERIFY(store.profile(id).contains("17890"));
+        QVERIFY(store.profile(id).contains("16666"));
         store.saveProfile("新名称", {}, "mode: direct\n", id);
         QCOMPARE(store.profiles().size(), 1); QCOMPARE(store.profiles()[0].toObject()["name"].toString(), QString("新名称"));
         QVERIFY_EXCEPTION_THROWN(store.profile("../../etc/passwd"), std::runtime_error);
@@ -726,7 +726,7 @@ private slots:
         QTemporaryDir dir; Store store(dir.path());
         const auto id = store.saveProfile("full YAML", {}, "port: 7890\nsocks-port: 7891\ngeo-auto-update: true\nrules: [\"MATCH,DIRECT\"]\n");
         auto config = parseConfig(store.runtime(id));
-        QCOMPARE(config["mixed-port"].as<int>(), 17890);
+        QCOMPARE(config["mixed-port"].as<int>(), 16666);
         QCOMPARE(config["port"].as<int>(), 7890);
         QCOMPARE(config["socks-port"].as<int>(), 7891);
         QVERIFY(!config["geo-auto-update"].as<bool>());
@@ -738,10 +738,10 @@ private slots:
     void runtimeController()
     {
         QTemporaryDir d; Store store(d.path());
-        auto id = store.saveProfile("test", {}, "mixed-port: 17890\nsecret: subscription-secret\nexternal-controller: 0.0.0.0:9090\n");
+        auto id = store.saveProfile("test", {}, "mixed-port: 16666\nsecret: subscription-secret\nexternal-controller: 0.0.0.0:9090\n");
         auto s = store.settings(); s["secret"] = "private-token"; store.setSettings(s);
         const auto node = parseConfig(store.runtime(id));
-        QCOMPARE(node["external-controller"].as<std::string>(), std::string("127.0.0.1:19090"));
+        QCOMPARE(node["external-controller"].as<std::string>(), std::string("127.0.0.1:19999"));
         QCOMPARE(node["secret"].as<std::string>(), std::string("private-token"));
         QVERIFY(node["profile"]["store-selected"].as<bool>());
         QVERIFY(node["unified-delay"].as<bool>());
@@ -771,7 +771,7 @@ private slots:
     }
     void endpointAndEncoding()
     {
-        QVERIFY(Api::validEndpoint(QUrl("http://127.0.0.1:19090")));
+        QVERIFY(Api::validEndpoint(QUrl("http://127.0.0.1:19999")));
         QVERIFY(Api::validEndpoint(QUrl("https://example.com:9090")));
         QVERIFY(!Api::validEndpoint(QUrl("http://example.com:9090")));
         QVERIFY(!Api::validEndpoint(QUrl("https://token@example.com")));
@@ -926,7 +926,7 @@ private slots:
                         QJsonObject proxies{{"组 /日本", QJsonObject{{"type", "Selector"}, {"all", QJsonArray{"DIRECT", "REJECT"}}, {"now", now}}},
                                             {"DIRECT", QJsonObject{{"type", "Direct"}}}, {"REJECT", QJsonObject{{"type", "Reject"}}}};
                         body = QJsonDocument(QJsonObject{{"proxies", proxies}}).toJson(QJsonDocument::Compact);
-                    } else if (buffer->startsWith("GET /configs ")) body = "{\"mode\":\"rule\",\"mixed-port\":17890}";
+                    } else if (buffer->startsWith("GET /configs ")) body = "{\"mode\":\"rule\",\"mixed-port\":16666}";
                     else body = "{}";
                     socket->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
                     socket->disconnectFromHost();

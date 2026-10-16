@@ -70,13 +70,13 @@ def main():
             entries = ['localhost', '*.example.com', '10.0.0.0/8', '::1']
             ok(action='bypass', entries=entries)
             assert state() == before, 'Saving while disabled changed desktop proxy'
-            ok(action='proxy', mode='manual', port=17890)
+            ok(action='proxy', mode='manual', port=16666)
             assert dbus('GetProxyMethod') == 'manual'
             assert [v.strip() for v in dbus('GetProxyIgnoreHosts').split(',')] == entries, repr(dbus('GetProxyIgnoreHosts'))
             entries = ['*.changed.test', '192.168.0.0/16', 'fc00::/7']
             ok(action='bypass', entries=entries)
             assert [v.strip() for v in dbus('GetProxyIgnoreHosts').split(',')] == entries, repr(dbus('GetProxyIgnoreHosts'))
-            ok(action='proxy', mode='auto', port=17890)
+            ok(action='proxy', mode='auto', port=16666)
             assert dbus('GetProxyMethod') == 'auto'
             assert dbus('GetAutoProxy') == 'http://127.0.0.1:19091/proxy.pac'
             assert '*.changed.test' in pac()

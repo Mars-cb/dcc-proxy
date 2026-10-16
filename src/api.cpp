@@ -14,7 +14,7 @@ namespace Party {
 Api::Api(QObject *parent) : QObject(parent)
 {
     m_network.setProxy(QNetworkProxy::NoProxy);
-    m_endpoint = QUrl("http://127.0.0.1:19090");
+    m_endpoint = QUrl("http://127.0.0.1:19999");
 }
 Api::~Api()
 {

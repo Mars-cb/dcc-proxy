@@ -306,7 +306,7 @@ private:
                     if (previous[key.toStdString()]) ownedPorts.insert(previous[key.toStdString()].as<int>());
                 for (const auto &key : QStringList{"mixed-port", "socks-port", "tproxy-port"})
                     if (previous[key.toStdString()]) ownedUdpPorts.insert(previous[key.toStdString()].as<int>());
-                const int controllerPort = QUrl(m_store.settings()["endpoint"].toString()).port(19090);
+                const int controllerPort = QUrl(m_store.settings()["endpoint"].toString()).port(19999);
                 for (const auto &key : proxyPortKeys()) {
                     const int port = config[key.toStdString()] ? config[key.toStdString()].as<int>() : 0;
                     if (port <= 0) continue;
@@ -381,7 +381,7 @@ private:
         for (const auto &key : proxyPortKeys())
             if (controlled[key.toStdString()]) ports[key] = controlled[key.toStdString()].as<int>();
         validateProxyPorts(ports);
-        const int controller = QUrl(m_store.settings()["endpoint"].toString()).port(19090);
+        const int controller = QUrl(m_store.settings()["endpoint"].toString()).port(19999);
         for (const auto &port : ports)
             if (port.toInt() == controller) throw std::runtime_error("代理端口不能与控制器端口相同");
         const bool running = m_core.state() == QProcess::Running;
