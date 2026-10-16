@@ -32,6 +32,7 @@
 #include <QSocketNotifier>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QUdpSocket>
 #include <sys/socket.h>
 #include <signal.h>
 #include <unistd.h>
@@ -210,7 +211,7 @@ private:
                 m_store.setSettings(current);
                 const int port = document.object()["mixed-port"].toInt();
                 if (m_expectedMixedPort > 0) {
-                    QTcpSocket probe;
+                    QTcpSocket probe; probe.setProxy(QNetworkProxy::NoProxy);
                     probe.connectToHost(QHostAddress::LocalHost, quint16(m_expectedMixedPort));
                     if (port != m_expectedMixedPort || !probe.waitForConnected(100)) {
                         if (m_readyTimer.elapsed() < 10000) {
@@ -297,14 +298,33 @@ private:
                 // Validate first, including ports, then replace the running process.
                 const auto config = parseConfig(readFile(candidate));
                 const int mixedPort = config["mixed-port"] ? config["mixed-port"].as<int>() : 0;
-                const bool ownsPort = m_core.state() == QProcess::Running && mixedPort == localProxyPort(m_store);
-                if (mixedPort > 0 && !ownsPort) {
-                    QTcpServer probe;
-                    if (!probe.listen(QHostAddress::LocalHost, quint16(mixedPort))) {
+                YAML::Node previous(YAML::NodeType::Map);
+                if (m_core.state() == QProcess::Running && QFile::exists(work + "/config.yaml"))
+                    previous = parseConfig(readFile(work + "/config.yaml"));
+                QSet<int> ownedPorts, ownedUdpPorts, requestedPorts;
+                for (const auto &key : proxyPortKeys())
+                    if (previous[key.toStdString()]) ownedPorts.insert(previous[key.toStdString()].as<int>());
+                for (const auto &key : QStringList{"mixed-port", "socks-port", "tproxy-port"})
+                    if (previous[key.toStdString()]) ownedUdpPorts.insert(previous[key.toStdString()].as<int>());
+                const int controllerPort = QUrl(m_store.settings()["endpoint"].toString()).port(19090);
+                for (const auto &key : proxyPortKeys()) {
+                    const int port = config[key.toStdString()] ? config[key.toStdString()].as<int>() : 0;
+                    if (port <= 0) continue;
+                    if (requestedPorts.contains(port) || port == controllerPort) {
+                        m_busy = false; m_error = QString("代理端口 %1 与其它监听或控制器端口重复").arg(port);
+                        answer({{"error", m_error}}); return;
+                    }
+                    requestedPorts.insert(port);
+                    QTcpServer probe; QUdpSocket udpProbe;
+                    probe.setProxy(QNetworkProxy::NoProxy); udpProbe.setProxy(QNetworkProxy::NoProxy);
+                    const bool usesUdp = key == "mixed-port" || key == "socks-port" || key == "tproxy-port";
+                    const bool tcpReady = ownedPorts.contains(port) || probe.listen(QHostAddress::LocalHost, quint16(port));
+                    const bool udpReady = !usesUdp || ownedUdpPorts.contains(port) ||
+                        udpProbe.bind(QHostAddress::LocalHost, quint16(port), QAbstractSocket::DontShareAddress);
+                    if (!tcpReady || !udpReady) {
                         m_busy = false;
-                        m_error = QString("混合端口 %1 已被其他程序占用，请更换 mixed-port 后重试").arg(mixedPort);
-                        answer({{"error", m_error}});
-                        return;
+                        m_error = QString("端口 %1 (%2 / %3) 已被其他程序占用，请更换后重试").arg(port).arg(key, tcpReady ? "UDP" : "TCP");
+                        answer({{"error", m_error}}); return;
                     }
                 }
                 writeFile(work + "/config.yaml", readFile(candidate));
@@ -347,6 +367,57 @@ private:
         controlled["tun"]["enable"] = false;
         writeFile(path, emitYaml(controlled));
         log(reason.toUtf8() + '\n');
+    }
+    void configurePorts(const QJsonObject &input, Answer answer)
+    {
+        if (m_busy) { answer({{"error", "内核正在操作，请稍候"}}); return; }
+        const auto patch = validateProxyPorts(input);
+        const auto path = dataDir() + "/controlled.yaml";
+        const bool existed = QFile::exists(path);
+        const auto oldBytes = existed ? readFile(path) : QByteArray();
+        auto controlled = existed ? parseConfig(oldBytes) : YAML::Node(YAML::NodeType::Map);
+        controlled = mergeYaml(controlled, parseConfig(QJsonDocument(patch).toJson()));
+        QJsonObject ports;
+        for (const auto &key : proxyPortKeys())
+            if (controlled[key.toStdString()]) ports[key] = controlled[key.toStdString()].as<int>();
+        validateProxyPorts(ports);
+        const int controller = QUrl(m_store.settings()["endpoint"].toString()).port(19090);
+        for (const auto &port : ports)
+            if (port.toInt() == controller) throw std::runtime_error("代理端口不能与控制器端口相同");
+        const bool running = m_core.state() == QProcess::Running;
+        const auto oldPid = m_core.processId();
+        const auto id = m_profile;
+        auto restore = [path, existed, oldBytes] { if (existed) writeFile(path, oldBytes); else QFile::remove(path); };
+        writeFile(path, emitYaml(controlled));
+        if (!running) { answer({{"message", "端口设置已保存，下次启动生效"}, {"running", false}}); return; }
+        auto complete = [this, answer, restore, id, oldPid](QJsonObject result) {
+            QString error = result["error"].toString();
+            if (error.isEmpty()) {
+                try {
+                    const int port = localProxyPort(m_store);
+                    if (!m_systemProxyMode.isEmpty()) {
+                        setSystemProxy(m_systemProxyMode, port, m_systemPacUrl, m_pacBypass);
+                        m_systemProxyPort = port; m_pacProxyPort = port;
+                    }
+                    result["message"] = "端口已应用，已启用的系统代理同步更新"; answer(result); return;
+                } catch (const std::exception &e) { error = QString::fromUtf8(e.what()); }
+            }
+            try {
+                restore();
+                if (m_core.state() == QProcess::Running && m_core.processId() == oldPid) {
+                    m_error = error; auto state = status(); state["error"] = error; answer(state); return;
+                }
+                startCore(id, [this, answer, error](QJsonObject recovered) {
+                    m_error = error;
+                    if (!recovered["error"].toString().isEmpty()) m_error += "\n恢复原端口失败：" + recovered["error"].toString();
+                    recovered["error"] = m_error; answer(recovered);
+                }, false, true);
+            } catch (const std::exception &e) {
+                m_busy = false; m_error = error + "\n恢复端口失败：" + QString::fromUtf8(e.what()); answer({{"error", m_error}});
+            }
+        };
+        try { startCore(id, complete, false, true); }
+        catch (...) { restore(); throw; }
     }
     void configureTun(const QJsonObject &input, Answer answer)
     {
@@ -427,6 +498,7 @@ private:
         const auto action = command["action"].toString();
         if (action == "status") { answer(status()); return; }
         if (action == "tun") { if (!command["options"].isObject()) throw std::runtime_error("无效的虚拟网卡配置"); configureTun(command["options"].toObject(), answer); return; }
+        if (action == "ports") { if (!command["options"].isObject()) throw std::runtime_error("无效的代理端口配置"); configurePorts(command["options"].toObject(), answer); return; }
         if (action == "repair-tun") { repairTun(answer); return; }
         if (action == "stop") {
             if (m_busy) { answer({{"error", "A core operation is in progress"}}); return; }
@@ -582,18 +654,68 @@ int main(int argc, char **argv)
             if (i + 1 >= app.arguments().size()) return 2;
             QFile input;
             input.open(stdin, QIODevice::ReadOnly);
-            const auto doc = QJsonDocument::fromJson(input.readAll());
+            QJsonParseError parseError;
+            const auto doc = QJsonDocument::fromJson(input.readAll(), &parseError);
+            if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+                throw std::runtime_error("Override input must be a JSON configuration object");
             QJSEngine js;
-            const auto code = readFile(app.arguments()[i + 1]);
-            auto result = js.evaluate(QString::fromUtf8(code));
-            if (result.isError()) throw std::runtime_error(result.toString().toStdString());
+            // Qt 5.11 lacks Array.prototype.includes. Keep Clash scripts working
+            // without replacing the system engine or adding runtime dependencies.
+            js.evaluate(QStringLiteral(R"JS(
+                if (!Array.prototype.includes) Object.defineProperty(Array.prototype, 'includes', {
+                    configurable: true, writable: true,
+                    value: function(value, fromIndex) {
+                        'use strict';
+                        if (this == null) throw new TypeError('includes called on null or undefined');
+                        var array = Object(this);
+                        var length = Math.min(Math.max(Math.floor(Number(array.length) || 0), 0), 9007199254740991);
+                        var index = Number(fromIndex) || 0;
+                        index = index < 0 ? Math.ceil(index) : Math.floor(index);
+                        if (index < 0) index = Math.max(length + index, 0);
+                        for (; index < length; ++index) {
+                            var item = array[index];
+                            if (item === value || (item !== item && value !== value)) return true;
+                        }
+                        return false;
+                    }
+                });
+            )JS"));
+            const auto json = js.globalObject().property("JSON");
+            auto parse = json.property("parse");
+            auto stringify = json.property("stringify");
+            // Use plain JavaScript objects and arrays, including nested values.
+            const auto arg = parse.call({QString::fromUtf8(doc.toJson(QJsonDocument::Compact))});
+            auto invoke = js.evaluate(QStringLiteral(R"JS(
+                (function(fn, config, name) {
+                    try { return {ok: true, value: fn(config, name)}; }
+                    catch (error) {
+                        return {ok: false, error: String(error), line: error && error.lineNumber};
+                    }
+                })
+            )JS"));
+            const auto fileName = app.arguments()[i + 1];
+            const auto scriptError = [&](const QString &detail, int line) {
+                const auto location = line > 0 ? QString(":%1").arg(line) : QString();
+                return std::runtime_error(QString("JavaScript override %1%2: %3")
+                    .arg(QFileInfo(fileName).fileName(), location, detail).toStdString());
+            };
+            auto result = js.evaluate(QString::fromUtf8(readFile(fileName)), fileName);
+            if (result.isError()) throw scriptError(result.toString(), result.property("lineNumber").toInt());
             auto main = js.globalObject().property("main");
-            if (!main.isCallable()) throw std::runtime_error("Override must define function main(config)");
-            auto arg = js.toScriptValue(doc.object().toVariantMap());
-            result = main.call({arg});
-            if (result.isError() || !result.isObject() || result.isArray()) throw std::runtime_error("Override must return a configuration object");
-            const auto out = QJsonDocument::fromVariant(result.toVariant());
-            if (!out.isObject()) throw std::runtime_error("Override returned invalid data");
+            if (!main.isCallable()) throw std::runtime_error("Override must define function main(config, profileName)");
+            const auto profileName = i + 2 < app.arguments().size() ? app.arguments()[i + 2] : QString();
+            const auto called = invoke.call({main, arg, profileName});
+            if (!called.property("ok").toBool())
+                throw scriptError(called.property("error").toString(), called.property("line").toInt());
+            result = called.property("value");
+            if (result.isNull() || !result.isObject() || result.isArray() || result.isCallable())
+                throw std::runtime_error("Override must return a configuration object");
+            if (result.property("then").isCallable())
+                throw std::runtime_error("Override main must return a configuration object synchronously");
+            const auto serialized = stringify.call({result});
+            if (serialized.isError()) throw scriptError(serialized.toString(), serialized.property("lineNumber").toInt());
+            const auto out = QJsonDocument::fromJson(serialized.toString().toUtf8());
+            if (!out.isObject()) throw std::runtime_error("Override returned invalid configuration data");
             QTextStream(stdout) << out.toJson(QJsonDocument::Compact);
             return 0;
         }

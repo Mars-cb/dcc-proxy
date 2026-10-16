@@ -5,6 +5,9 @@
 #include "subscriptionnodes.h"
 #include <QCryptographicHash>
 #include <DSwitchButton>
+#include <DPasswordEdit>
+#include <QResizeEvent>
+#include <QTextCursor>
 #include <QRegularExpression>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -43,9 +46,63 @@
 #include <algorithm>
 
 namespace Party {
+class MessageArea : public QScrollArea {
+public:
+    explicit MessageArea(QLabel *label) : m_label(label) {
+        setObjectName("proxy-message-area"); setFrameShape(QFrame::NoFrame);
+        setWidgetResizable(true); setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        m_label->setAlignment(Qt::AlignLeft | Qt::AlignTop); setWidget(m_label); fit();
+    }
+    void fit() {
+        const int line = m_label->fontMetrics().lineSpacing();
+        const int height = qBound(line + 4, m_label->heightForWidth(qMax(100, viewport()->width() - 20)) + 4, line * 3 + 8);
+        if (this->height() != height) setFixedHeight(height);
+        m_label->setToolTip(m_label->text());
+    }
+protected:
+    void resizeEvent(QResizeEvent *event) override { QScrollArea::resizeEvent(event); fit(); }
+private:
+    QLabel *m_label;
+};
+static QString sectionHelp(const QString &section)
+{
+    static const QMap<QString, QString> help{
+        {"dns", QObject::tr("DNS：设置域名解析服务器。示例使用系统 DNS，通常无需单独开放 DNS 监听端口。nameserver 是解析器列表；启用 TUN 时会联动启用 DNS。")},
+        {"sniffer", QObject::tr("嗅探：从 HTTP/TLS 流量中识别域名，用于域名规则匹配。示例默认关闭，将 enable 改为 true 后启用；HTTP 80/8080、TLS 443 是待识别的目标端口。")},
+        {"hosts", QObject::tr("Hosts：为域名指定固定 IP。示例将 example.test 指向文档专用地址 192.0.2.10，请替换为你实际需要的域名和 IP。")},
+        {"listeners", QObject::tr("监听器：新增独立代理入口。示例仅在本机 127.0.0.1:17892 开放 HTTP 代理，使用 DIRECT 策略；端口必须空闲，可按需改为已有策略组名。常用混合/HTTP/SOCKS 端口也可直接在设置页修改。")},
+        {"tunnels", QObject::tr("隧道：把本地端口转发到指定目标。示例把本机 TCP 18081 转发到 127.0.0.1:18080，使用 DIRECT；目标端口需有实际服务。格式为 协议,本地监听,目标地址,策略。")}
+    };
+    return help.value(section) + QObject::tr("\n只修改当前订阅的该部分；保存后验证并重新加载，取消不生效。YAML 注意缩进；覆写和专用设置可能覆盖这里的值。");
+}
+static QByteArray sectionExample(const QString &section)
+{
+    static const QMap<QString, QByteArray> examples{
+        {"dns", "dns:\n  enable: true\n  enhanced-mode: redir-host\n  nameserver:\n    - system\n"},
+        {"sniffer", "sniffer:\n  enable: false\n  sniff:\n    HTTP:\n      ports: [80, 8080]\n      override-destination: true\n    TLS:\n      ports: [443]\n"},
+        {"hosts", "hosts:\n  example.test: 192.0.2.10\n"},
+        {"listeners", "listeners:\n  - name: local-http-example\n    type: http\n    listen: 127.0.0.1\n    port: 17892\n    proxy: DIRECT\n"},
+        {"tunnels", "tunnels:\n  - tcp,127.0.0.1:18081,127.0.0.1:18080,DIRECT\n"}
+    };
+    return examples.value(section);
+}
+static QByteArray yamlOverrideExample()
+{
+    return "# 映射递归合并；列表整体替换；null 删除字段。\n"
+           "# 此示例添加 hosts 映射并关闭局域网访问，不替换订阅节点和规则。\n"
+           "allow-lan: false\nhosts:\n  example.test: 192.0.2.10\n"
+           "# DNS 列表示例（取消注释后会替换原 nameserver 列表）：\n"
+           "# dns:\n#   nameserver:\n#     - 10.20.0.10\n#     - system\n";
+}
 static void labelText(QLabel *label, const QString &text)
 {
-    if (label->text() != text) label->setText(text);
+    if (label->text() != text) {
+        label->setText(text);
+        if (label->parentWidget() && label->parentWidget()->parentWidget())
+            if (auto *area = dynamic_cast<MessageArea *>(label->parentWidget()->parentWidget())) area->fit();
+    }
 }
 static QStringList textEntries(const QString &text)
 {
@@ -114,7 +171,7 @@ Panel::Panel(QWidget *parent) : QWidget(parent), m_api(this), m_download(this)
     m_status->setWordWrap(true);
     m_status->setTextFormat(Qt::PlainText);
     m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(m_status);
+    m_messageArea = new MessageArea(m_status); layout->addWidget(m_messageArea);
     m_tabs = new QTabWidget;
     m_tabs->setDocumentMode(true);
     m_tabs->setUsesScrollButtons(true);
@@ -129,21 +186,24 @@ Panel::Panel(QWidget *parent) : QWidget(parent), m_api(this), m_download(this)
     auto *logsPage = new QWidget;
     auto *logsLayout = new QVBoxLayout(logsPage);
     auto *logsRow = new QHBoxLayout;
-    m_pauseLogs = new QCheckBox(tr("暂停"));
+    m_pauseLogs = new QCheckBox(tr("暂停")); m_pauseLogs->setObjectName("pause-logs");
     logsRow->addWidget(m_pauseLogs);
-    m_logLevel = new QComboBox;
+    m_logLevel = new QComboBox; m_logLevel->setObjectName("log-level");
     m_logLevel->addItems({"info", "warning", "error", "debug", "silent"});
-    logsRow->addWidget(m_logLevel);
-    button(tr("清空"), logsRow, this, [this] { m_logs->clear(); });
-    button(tr("导出"), logsRow, this, [this] {
+    logsRow->addWidget(m_logLevel); logsRow->addStretch(); logsLayout->addLayout(logsRow);
+    auto *logActions = new QHBoxLayout;
+    button(tr("清空"), logActions, this, [this] { m_logs->clear(); });
+    button(tr("导出"), logActions, this, [this] {
         const auto path = QFileDialog::getSaveFileName(this, tr("导出日志"), "mihomo.log");
         if (!path.isEmpty()) guarded([&] { writeFile(path, m_logs->toPlainText().toUtf8()); });
     });
-    button(tr("后台日志"), logsRow, this, [this] {
+    button(tr("后台日志"), logActions, this, [this] {
         guarded([&] { editDocument(tr("后台日志"), readFile(dataDir() + "/daemon.log"), {}); });
     });
-    logsRow->addStretch(); logsLayout->addLayout(logsRow);
-    m_logs = new QPlainTextEdit;
+    logActions->addStretch(); logsLayout->addLayout(logActions);
+    m_logStatus = new QLabel(tr("显示后台最近记录；实时日志会在新连接产生时追加。")); m_logStatus->setWordWrap(true); logsLayout->addWidget(m_logStatus);
+    m_logs = new QPlainTextEdit; m_logs->setObjectName("core-logs");
+    m_logs->setPlaceholderText(tr("暂无日志。启动内核并通过本插件访问网页后，新连接会显示在这里。"));
     m_logs->setReadOnly(true); m_logs->setMaximumBlockCount(2000);
     logsLayout->addWidget(m_logs);
     m_tabs->addTab(logsPage, tr("日志"));
@@ -161,17 +221,24 @@ Panel::Panel(QWidget *parent) : QWidget(parent), m_api(this), m_download(this)
     reloadProfiles();
     connect(&m_refreshTimer, &QTimer::timeout, this, &Panel::refresh);
     m_refreshTimer.setInterval(3000);
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this] { syncStreams(); refresh(); });
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this] { if (m_tabs->currentIndex() == 6) loadLogHistory(); syncStreams(); refresh(); });
     connect(m_pauseLogs, &QCheckBox::toggled, this, [this] { syncStreams(); });
-    connect(m_logLevel, &QComboBox::currentTextChanged, this, [this] { m_api.stopStreams(); syncStreams(); });
+    connect(m_logLevel, &QComboBox::currentTextChanged, this, [this] {
+        m_api.stopStreams(); syncStreams();
+        if (m_connected) patchConfig({{"log-level", m_logLevel->currentText()}});
+    });
     connect(&m_api, &Api::streamData, this, [this](const QString &path, const QJsonObject &data) {
         if (path.startsWith("/logs")) {
+            labelText(m_logStatus, tr("实时日志已连接，后续连接记录会自动追加。"));
             if (!m_pauseLogs->isChecked()) m_logs->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ") + data["type"].toString() + " " + data["payload"].toString());
         } else if (path == "/traffic") {
             labelText(m_traffic, tr("上传 %1/s    下载 %2/s").arg(sizeText(data["up"].toDouble()), sizeText(data["down"].toDouble())));
         }
     });
-    connect(&m_api, &Api::streamError, this, [this](const QString &, const QString &) { /* next refresh reconnects */ });
+    connect(&m_api, &Api::streamError, this, [this](const QString &path, const QString &error) {
+        if (path.startsWith("/logs") && isVisible() && m_tabs->currentIndex() == 6 && !m_pauseLogs->isChecked())
+            labelText(m_logStatus, tr("实时日志连接中断：%1；将自动重连。后台历史仍可查看。").arg(error));
+    });
 }
 void Panel::guarded(std::function<void()> action)
 {
@@ -179,7 +246,7 @@ void Panel::guarded(std::function<void()> action)
 }
 void Panel::message(const QString &text, bool error)
 {
-    labelText(m_status, text);
+    labelText(m_status, text); m_messageArea->fit();
     auto p = m_status->palette();
     p.setColor(QPalette::WindowText, error ? QColor("#d9534f") : palette().color(QPalette::WindowText));
     if (m_status->palette() != p) m_status->setPalette(p);
@@ -189,7 +256,7 @@ QWidget *Panel::overviewPage()
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
     m_overview = new QLabel(tr("内核离线")); m_overview->setTextFormat(Qt::PlainText); m_overview->setWordWrap(true);
-    layout->addWidget(m_overview);
+    layout->addWidget(new MessageArea(m_overview));
     m_traffic = new QLabel(tr("上传 —    下载 —")); layout->addWidget(m_traffic);
     m_statistics = new QLabel(tr("连接 —    总上传 —    总下载 —    内存 —"));
     m_statistics->setObjectName("overview-statistics");
@@ -203,7 +270,7 @@ QWidget *Panel::overviewPage()
     m_restart = button(tr("重启"), controls, this, [this] { runService("restart"); });
     controls->addStretch(); layout->addLayout(controls);
     auto *form = new QFormLayout;
-    m_mode = new QComboBox;
+    m_mode = new QComboBox; m_mode->setObjectName("proxy-mode");
     m_mode->addItem(tr("规则"), "rule"); m_mode->addItem(tr("全局"), "global"); m_mode->addItem(tr("直连"), "direct");
     form->addRow(tr("代理模式"), m_mode);
     connect(m_mode, QOverload<int>::of(&QComboBox::activated), this, [this](int) { patchConfig({{"mode", m_mode->currentData().toString()}}); });
@@ -615,12 +682,12 @@ QWidget *Panel::profilesPage()
     button(tr("新建"), row, this, [this] { editProfile(true); });
     button(tr("更新"), row, this, [this] { updateProfile(); });
     button(tr("编辑"), row, this, [this] { editProfile(false); });
-    button(tr("订阅设置"), row, this, [this] { editSubscriptionOptions(); });
     row->addStretch(); layout->addLayout(row);
     m_profiles = table({tr("名称"), tr("来源"), tr("更新时间")}, layout); m_profiles->setObjectName("profiles");
     m_profiles->horizontalHeader()->setStretchLastSection(false);
     m_profiles->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     auto *actions = new QHBoxLayout;
+    button(tr("订阅设置"), actions, this, [this] { editSubscriptionOptions(); });
     button(tr("使用此配置"), actions, this, [this] { activateProfile(); });
     button(tr("导出"), actions, this, [this] {
         const auto p = selectedProfile(); if (p.isEmpty()) return;
@@ -644,7 +711,7 @@ void Panel::editSubscriptionOptions()
     form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     auto *name = new QLineEdit(p["name"].toString()); form->addRow(tr("名称"), name);
     auto *url = new QLineEdit(p["url"].toString()); form->addRow(tr("订阅 URL"), url);
-    auto *agent = new QLineEdit(p["userAgent"].toString()); agent->setPlaceholderText("mihomo.party/v2.0.3 (clash.meta)"); form->addRow("User-Agent", agent);
+    auto *agent = new QLineEdit(p["userAgent"].toString()); agent->setPlaceholderText("Mozilla/5.0"); form->addRow("User-Agent", agent);
     auto *token = new QLineEdit(p["authToken"].toString()); token->setEchoMode(QLineEdit::Password); form->addRow(tr("Authorization 令牌"), token);
     auto *interval = new QSpinBox; interval->setRange(0, 10080); interval->setSuffix(tr(" 分钟")); interval->setSpecialValueText(tr("跟随全局")); interval->setValue(p["updateMinutes"].toInt()); form->addRow(tr("更新周期"), interval);
     auto *timeout = new QSpinBox; timeout->setRange(5, 180); timeout->setSuffix(tr(" 秒")); timeout->setValue(p["timeoutSeconds"].toInt(30)); form->addRow(tr("请求超时"), timeout);
@@ -755,7 +822,7 @@ void Panel::runService(const QString &action, const QString &profile)
 void Panel::backgroundCommand(const QJsonObject &command, Api::Done extra)
 {
     const QString action = command["action"].toString();
-    const bool coreOperation = action == "start" || action == "stop" || action == "restart";
+    const bool coreOperation = action == "start" || action == "stop" || action == "restart" || action == "ports";
     if (coreOperation) { m_coreBusy = true; m_coreSwitch->setEnabled(false); m_restart->setEnabled(false); }
     auto done = [this, coreOperation, extra](const QJsonValue &value, const QString &error) {
         if (coreOperation) m_coreBusy = false;
@@ -792,8 +859,8 @@ void Panel::backgroundCommand(const QJsonObject &command, Api::Done extra)
 QWidget *Panel::connectionsPage()
 {
     auto *page = new QWidget; auto *layout = new QVBoxLayout(page);
-    m_connectionSearch = new QLineEdit; m_connectionSearch->setPlaceholderText(tr("搜索域名、进程、规则、节点")); layout->addWidget(m_connectionSearch);
-    m_connections = table({tr("目标"), tr("进程"), tr("类型"), tr("规则"), tr("代理链"), tr("上传"), tr("下载")}, layout);
+    m_connectionSearch = new QLineEdit; m_connectionSearch->setObjectName("connection-search"); m_connectionSearch->setPlaceholderText(tr("搜索域名、进程、规则、节点")); layout->addWidget(m_connectionSearch);
+    m_connections = table({tr("目标"), tr("进程"), tr("类型"), tr("规则"), tr("代理链"), tr("上传"), tr("下载")}, layout); m_connections->setObjectName("connections");
     auto *row = new QHBoxLayout;
     button(tr("关闭选中连接"), row, this, [this] {
         const int r = m_connections->currentRow(); if (r < 0) return;
@@ -810,8 +877,8 @@ QWidget *Panel::connectionsPage()
 QWidget *Panel::rulesPage()
 {
     auto *page = new QWidget; auto *layout = new QVBoxLayout(page);
-    m_ruleSearch = new QLineEdit; m_ruleSearch->setPlaceholderText(tr("搜索规则")); layout->addWidget(m_ruleSearch);
-    m_rules = table({tr("类型"), tr("匹配内容"), tr("目标策略"), tr("状态")}, layout);
+    m_ruleSearch = new QLineEdit; m_ruleSearch->setObjectName("rule-search"); m_ruleSearch->setPlaceholderText(tr("搜索规则")); layout->addWidget(m_ruleSearch);
+    m_rules = table({tr("类型"), tr("匹配内容"), tr("目标策略"), tr("状态")}, layout); m_rules->setObjectName("rules");
     auto *row = new QHBoxLayout;
     button(tr("编辑配置规则"), row, this, [this] { editSection("rules"); });
     button(tr("启用 / 禁用规则"), row, this, [this] {
@@ -827,7 +894,7 @@ QWidget *Panel::rulesPage()
 QWidget *Panel::providersPage()
 {
     auto *page = new QWidget; auto *layout = new QVBoxLayout(page);
-    m_providers = table({tr("类型"), tr("名称"), tr("来源"), tr("更新时间"), tr("条目数")}, layout);
+    m_providers = table({tr("类型"), tr("名称"), tr("来源"), tr("更新时间"), tr("条目数")}, layout); m_providers->setObjectName("providers");
     auto *row = new QHBoxLayout;
     button(tr("更新资源"), row, this, [this] { resourceAction(false); });
     button(tr("节点健康检查"), row, this, [this] { resourceAction(true); });
@@ -849,10 +916,19 @@ QWidget *Panel::overridePage()
 {
     auto *page = new QWidget; auto *layout = new QVBoxLayout(page);
     m_overrideEnabled = new QCheckBox(tr("启用 YAML 覆写")); m_overrideEnabled->setToolTip(tr("映射递归合并，列表整体替换，null 删除字段")); layout->addWidget(m_overrideEnabled);
-    m_yamlOverride = new QPlainTextEdit; m_yamlOverride->setPlaceholderText("mixed-port: 17890\nallow-lan: false"); layout->addWidget(m_yamlOverride, 1);
+    auto *help = new QLabel(tr("YAML 覆写会合并到订阅配置：同名映射递归合并，列表整体替换，null 删除字段。例：hosts 添加域名到 IP 的映射；dns.nameserver 替换 DNS 列表；allow-lan: false 禁止局域网接入。节点和 rules 列表只在明确需要整体替换时填写。保存后重启内核生效。"));
+    help->setObjectName("yaml-override-help"); help->setWordWrap(true); help->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); layout->addWidget(help);
+    m_yamlOverride = new QPlainTextEdit; m_yamlOverride->setObjectName("yaml-override-editor"); m_yamlOverride->setPlaceholderText("mixed-port: 17890\nallow-lan: false"); layout->addWidget(m_yamlOverride, 1);
     m_scriptEnabled = new QCheckBox(tr("启用 JavaScript 覆写")); m_scriptEnabled->setToolTip(tr("隔离执行，限时 4 秒")); layout->addWidget(m_scriptEnabled);
-    m_jsOverride = new QPlainTextEdit; m_jsOverride->setPlaceholderText("function main(config) {\n  return config;\n}"); layout->addWidget(m_jsOverride, 1);
+    m_jsOverride = new QPlainTextEdit; m_jsOverride->setObjectName("javascript-override-editor"); m_jsOverride->setPlaceholderText("function main(config) {\n  return config;\n}"); layout->addWidget(m_jsOverride, 1);
     auto *row = new QHBoxLayout;
+    auto *exampleRow = new QHBoxLayout;
+    button(tr("填入 YAML 示例"), exampleRow, this, [this] {
+        if (!m_yamlOverride->toPlainText().trimmed().isEmpty() && m_yamlOverride->toPlainText().trimmed() != "{}" &&
+            QMessageBox::question(this, tr("填入示例"), tr("替换当前编辑区内容？保存前不会影响已生效配置。")) != QMessageBox::Yes) return;
+        m_yamlOverride->setPlainText(QString::fromUtf8(yamlOverrideExample()));
+    })->setObjectName("yaml-override-example");
+    exampleRow->addStretch(); layout->insertLayout(2, exampleRow);
     button(tr("保存覆写"), row, this, [this] {
         guarded([&] {
             const auto yaml = m_yamlOverride->toPlainText().trimmed().isEmpty() ? QByteArray("{}\n") : m_yamlOverride->toPlainText().toUtf8();
@@ -870,11 +946,36 @@ QWidget *Panel::settingsPage()
 {
     auto *page = new QWidget; auto *layout = new QVBoxLayout(page); auto *form = new QFormLayout;
     m_endpoint = new QLineEdit; m_endpoint->setObjectName("controller-endpoint"); form->addRow(tr("控制器地址"), m_endpoint);
-    m_secret = new QLineEdit; m_secret->setEchoMode(QLineEdit::Password); form->addRow(tr("API 密钥"), m_secret);
+    auto *secretField = new Dtk::Widget::DPasswordEdit; secretField->setObjectName("api-secret-field");
+    secretField->setEchoMode(QLineEdit::Password); secretField->setEchoButtonIsVisible(true);
+    m_secret = secretField->lineEdit(); m_secret->setObjectName("api-secret"); form->addRow(tr("API 密钥"), secretField);
     auto *coreRow = new QHBoxLayout; m_corePath = new QLineEdit; coreRow->addWidget(m_corePath);
     button(tr("选择"), coreRow, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, tr("选择 Mihomo / Smart 内核")); if (!path.isEmpty()) m_corePath->setText(path);
     }); form->addRow(tr("内核路径"), coreRow);
+    const QMap<QString, QString> portLabels = {{"mixed-port", tr("混合端口（HTTP / SOCKS）")},
+        {"port", tr("HTTP 端口")}, {"socks-port", tr("SOCKS 端口")},
+        {"redir-port", tr("重定向端口")}, {"tproxy-port", tr("透明代理端口")}};
+    for (const auto &key : proxyPortKeys()) {
+        auto *spin = new QSpinBox; spin->setObjectName("proxy-" + key);
+        spin->setRange(key == "mixed-port" ? 1 : 0, 65535);
+        if (key != "mixed-port") spin->setSpecialValueText(tr("关闭"));
+        spin->setValue(key == "mixed-port" ? 17890 : 0);
+        m_proxyPorts.insert(key, spin); form->addRow(portLabels[key], spin);
+    }
+    m_applyPorts = new QPushButton(tr("保存并应用端口")); m_applyPorts->setObjectName("apply-proxy-ports");
+    connect(m_applyPorts, &QPushButton::clicked, this, [this] {
+        guarded([&] {
+            QJsonObject ports; for (auto it = m_proxyPorts.begin(); it != m_proxyPorts.end(); ++it) ports[it.key()] = it.value()->value();
+            validateProxyPorts(ports); m_applyPorts->setEnabled(false);
+            backgroundCommand({{"action", "ports"}, {"options", ports}}, [this](const QJsonValue &, const QString &) {
+                m_applyPorts->setEnabled(true); loadPortSettings();
+            });
+        });
+    });
+    form->addRow(m_applyPorts);
+    auto *portHint = new QLabel(tr("其它端口填 0 关闭。运行中修改会重启本插件内核，并同步已启用的系统代理；失败恢复原配置。"));
+    portHint->setWordWrap(true); form->addRow(portHint);
     m_unifiedDelay = new QCheckBox(tr("统一延迟（与 Clash Party 一致，重启内核后生效）")); m_unifiedDelay->setObjectName("unified-delay"); form->addRow(m_unifiedDelay);
     m_autoSystemProxy = new QCheckBox(tr("启动内核时自动启用系统代理")); m_autoSystemProxy->setObjectName("auto-system-proxy"); form->addRow(m_autoSystemProxy);
     m_systemNodeDns = new QCheckBox(tr("节点域名使用系统 DNS（重启内核后生效）")); form->addRow(m_systemNodeDns);
@@ -928,9 +1029,9 @@ QWidget *Panel::settingsPage()
         guarded([&] { restore(dataDir(), readFile(path)); loadSettings(); reloadProfiles(); message(tr("已恢复，重启内核后生效")); });
     }); backupRow->addStretch(); layout->addLayout(backupRow);
     auto *davForm = new QFormLayout;
-    m_davUrl = new QLineEdit; m_davUrl->setPlaceholderText("https://server/path/dcc-proxy-backup.json"); davForm->addRow(tr("WebDAV 文件 URL"), m_davUrl);
-    m_davUser = new QLineEdit; davForm->addRow(tr("用户名"), m_davUser);
-    m_davPassword = new QLineEdit; m_davPassword->setEchoMode(QLineEdit::Password); davForm->addRow(tr("密码"), m_davPassword); layout->addLayout(davForm);
+    m_davUrl = new QLineEdit; m_davUrl->setObjectName("webdav-url"); m_davUrl->setPlaceholderText("https://server/path/dcc-proxy-backup.json"); davForm->addRow(tr("WebDAV 文件 URL"), m_davUrl);
+    m_davUser = new QLineEdit; m_davUser->setObjectName("webdav-user"); davForm->addRow(tr("用户名"), m_davUser);
+    m_davPassword = new QLineEdit; m_davPassword->setObjectName("webdav-password"); m_davPassword->setEchoMode(QLineEdit::Password); davForm->addRow(tr("密码"), m_davPassword); layout->addLayout(davForm);
     auto *davRow = new QHBoxLayout;
     button(tr("上传备份"), davRow, this, [this] { webdav(true); });
     button(tr("下载并恢复"), davRow, this, [this] { webdav(false); });
@@ -948,6 +1049,8 @@ void Panel::loadSettings()
         const auto controlledPath = dataDir() + "/controlled.yaml";
         const auto controlled = QFile::exists(controlledPath) ? parseConfig(readFile(controlledPath)) : YAML::Node(YAML::NodeType::Map);
         m_unifiedDelay->setChecked(!controlled["unified-delay"] || controlled["unified-delay"].as<bool>());
+        loadPortSettings();
+        { QSignalBlocker block(m_logLevel); m_logLevel->setCurrentText(controlled["log-level"] ? QString::fromStdString(controlled["log-level"].as<std::string>()) : "info"); }
         m_autoSystemProxy->setChecked(s.value("autoSystemProxy").toBool(true));
         m_systemNodeDns->setChecked(s.value("systemNodeDns").toBool(true));
         QStringList bypass = defaultProxyBypass();
@@ -961,7 +1064,25 @@ void Panel::loadSettings()
         m_davUrl->setText(s["webdavUrl"].toString()); m_davUser->setText(s["webdavUser"].toString());
         m_api.configure(m_endpoint->text(), m_secret->text());
         if (QFile::exists(dataDir() + "/override.yaml")) m_yamlOverride->setPlainText(QString::fromUtf8(readFile(dataDir() + "/override.yaml")));
+        if (m_yamlOverride->toPlainText().trimmed().isEmpty() || m_yamlOverride->toPlainText().trimmed() == "{}")
+            m_yamlOverride->setPlainText(QString::fromUtf8(yamlOverrideExample()));
         if (QFile::exists(dataDir() + "/override.js")) m_jsOverride->setPlainText(QString::fromUtf8(readFile(dataDir() + "/override.js")));
+    });
+}
+void Panel::loadPortSettings()
+{
+    guarded([&] {
+        YAML::Node config(YAML::NodeType::Map);
+        const auto work = dataDir() + "/work/config.yaml";
+        const auto id = m_store.settings()["active"].toString();
+        if (QFile::exists(work)) config = parseConfig(readFile(work));
+        else if (validId(id)) config = parseConfig(m_store.profile(id));
+        const auto path = dataDir() + "/controlled.yaml";
+        if (QFile::exists(path)) config = mergeYaml(config, parseConfig(readFile(path)));
+        for (auto it = m_proxyPorts.begin(); it != m_proxyPorts.end(); ++it) {
+            const auto value = config[it.key().toStdString()];
+            it.value()->setValue(value ? value.as<int>() : (it.key() == "mixed-port" ? 17890 : 0));
+        }
     });
 }
 void Panel::saveSettings()
@@ -1002,10 +1123,18 @@ void Panel::patchConfig(const QJsonObject &patch)
         refresh();
     });
 }
-void Panel::editDocument(const QString &title, const QByteArray &data, std::function<void(QByteArray)> save)
+void Panel::editDocument(const QString &title, const QByteArray &data, std::function<void(QByteArray)> save, const QString &help, const QByteArray &example)
 {
     QDialog dialog(this); dialog.setWindowTitle(title); dialog.resize(700, 520);
-    auto *layout = new QVBoxLayout(&dialog); auto *edit = new QPlainTextEdit(QString::fromUtf8(data)); edit->setReadOnly(!save); layout->addWidget(edit);
+    auto *layout = new QVBoxLayout(&dialog);
+    if (!help.isEmpty()) { auto *label = new QLabel(help); label->setObjectName("config-editor-help"); label->setWordWrap(true); label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); layout->addWidget(label); }
+    if (!example.isEmpty()) {
+        auto *row = new QHBoxLayout; button(tr("填入示例"), row, &dialog, [&dialog, example] {
+            auto *edit = dialog.findChild<QPlainTextEdit *>("config-document-editor");
+            if (edit && (edit->toPlainText().trimmed().isEmpty() || QMessageBox::question(&dialog, tr("填入示例"), tr("替换当前编辑区内容？保存后才会生效。")) == QMessageBox::Yes)) edit->setPlainText(QString::fromUtf8(example));
+        }); row->addStretch(); layout->addLayout(row);
+    }
+    auto *edit = new QPlainTextEdit(QString::fromUtf8(data)); edit->setObjectName("config-document-editor"); edit->setReadOnly(!save); layout->addWidget(edit);
     auto *buttons = new QDialogButtonBox(save ? QDialogButtonBox::Save | QDialogButtonBox::Cancel : QDialogButtonBox::Close);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -1021,7 +1150,8 @@ void Panel::editSection(const QString &section)
         const auto id = m_store.settings()["active"].toString();
         auto node = parseConfig(m_store.profile(id));
         YAML::Node wrapper; wrapper[section.toStdString()] = node[section.toStdString()];
-        editDocument(section.toUpper(), emitYaml(wrapper), [this, id, section, node](QByteArray text) mutable {
+        const bool empty = !node[section.toStdString()] || node[section.toStdString()].IsNull();
+        editDocument(section.toUpper(), empty && !sectionExample(section).isEmpty() ? sectionExample(section) : emitYaml(wrapper), [this, id, section, node](QByteArray text) mutable {
             const auto edited = parseConfig(text);
             node[section.toStdString()] = edited[section.toStdString()];
             const auto list = m_store.profiles();
@@ -1029,7 +1159,7 @@ void Panel::editSection(const QString &section)
                 m_store.saveProfile(p.toObject()["name"].toString(), p.toObject()["url"].toString(), emitYaml(node), id); break;
             }
             runService("restart", id);
-        });
+        }, sectionHelp(section), sectionExample(section));
     });
 }
 QWidget *Panel::toolsPage()
@@ -1108,6 +1238,7 @@ void Panel::refresh()
             return;
         }
         const auto config = value.toObject();
+        if (!wasConnected) { QSignalBlocker block(m_logLevel); m_logLevel->setCurrentText(config["log-level"].toString("info")); }
         labelText(m_overview, tr("内核已连接    混合端口 %1    HTTP %2    SOCKS %3    局域网 %4")
             .arg(config["mixed-port"].toInt()).arg(config["port"].toInt()).arg(config["socks-port"].toInt()).arg(config["allow-lan"].toBool() ? tr("允许") : tr("禁止")));
         { QSignalBlocker block(m_mode); m_mode->setCurrentIndex(m_mode->findData(config["mode"].toString())); }
@@ -1171,6 +1302,17 @@ void Panel::refresh()
         });
     }
 }
+void Panel::loadLogHistory()
+{
+    if (m_logHistoryLoaded) return;
+    QFile file(dataDir() + "/daemon.log");
+    if (!file.open(QIODevice::ReadOnly)) return;
+    const bool tail = file.size() > 64 * 1024;
+    if (tail) file.seek(file.size() - 64 * 1024);
+    auto bytes = file.readAll(); if (tail) bytes = bytes.mid(bytes.indexOf('\n') + 1);
+    auto text = QString::fromUtf8(bytes); text.remove(QRegularExpression("\x1b\\[[0-9;]*m"));
+    if (!text.trimmed().isEmpty()) { m_logHistoryLoaded = true; m_logs->appendPlainText(text.trimmed()); m_logs->moveCursor(QTextCursor::End); }
+}
 void Panel::syncStreams()
 {
     const bool active = isVisible() && m_connected;
@@ -1181,7 +1323,7 @@ void Panel::syncStreams()
     }
 }
 void Panel::showEvent(QShowEvent *event) { QWidget::showEvent(event); m_refreshTimer.start(); refresh(); syncStreams(); }
-void Panel::hideEvent(QHideEvent *event) { m_refreshTimer.stop(); m_api.stopStreams(); QWidget::hideEvent(event); }
+void Panel::hideEvent(QHideEvent *event) { if (auto *secret = findChild<Dtk::Widget::DPasswordEdit *>("api-secret-field")) secret->setEchoMode(QLineEdit::Password); m_refreshTimer.stop(); m_api.stopStreams(); QWidget::hideEvent(event); }
 void Panel::openPage(const QString &page)
 {
     const QStringList names{"Overview", "Proxies", "Profiles", "Connections", "Rules", "Providers", "Logs", "Overrides", "Tools", "Settings", "Tun"};

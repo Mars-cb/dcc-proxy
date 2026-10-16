@@ -154,14 +154,14 @@ void serviceRequest(const QJsonObject &command, QObject *context, Api::Done done
         finish(doc.object(), doc.object()["error"].toString());
     });
     const auto action = command["action"].toString();
-    timer->start(action == "start" || action == "restart" || action == "tun" ? 140000 : 20000);
+    timer->start(action == "start" || action == "restart" || action == "tun" || action == "ports" ? 140000 : 20000);
     socket->connectToServer(socketName());
 }
 void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPort, QObject *context, SubscriptionDone done)
 {
     if (!url.isValid() || !url.userInfo().isEmpty() || (url.scheme() != "http" && url.scheme() != "https")) { done({}, {}, QObject::tr("订阅 URL 无效")); return; }
     QString userAgent = options["userAgent"].toString();
-    if (userAgent.isEmpty()) userAgent = "mihomo.party/v2.0.3 (clash.meta)";
+    if (userAgent.isEmpty()) userAgent = "Mozilla/5.0";
     const QString authorization = options["authToken"].toString();
     if (userAgent.contains('\n') || userAgent.contains('\r') || authorization.contains('\n') || authorization.contains('\r')) { done({}, {}, QObject::tr("订阅请求头无效")); return; }
     using Attempt = std::function<void(QUrl, bool, int)>;

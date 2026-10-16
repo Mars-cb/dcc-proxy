@@ -166,3 +166,29 @@ Qt 回归增加缺失 mixed-port 时的默认监听及显式覆写优先级检�
 多个订阅，展示名称/协议/国旗与分组，重复刷新保留卡片。预览不创建后台 socket、不写
 active、不发切换/测速请求，不将未启动状态标为节点失败。inline provider、include-all、
 正则分组与私密节点字段不进入预览模型也有覆盖。
+
+## JavaScript 覆写兼容回归（0.1.5）
+
+`javascriptOverrideDnsAndProfileName` 通过实际后台 `--eval` 子进程执行用户的 DNS
+prepend 脚本：保留原 DNS 顺序、插入 `10.20.0.10`、重复执行不重复插入，覆盖缺失
+DNS 和非数组 nameserver，并验证中文订阅名传入第二参数以及 includes 的 NaN、负索引、
+Infinity 和类数组行为。`javascriptOverrideErrors` 覆盖运行时异常、字符串异常、语法错误、
+无返回值、null、数组、循环引用、异步结果及非法 JSON 输入，验证错误不再被返回值校验掩盖。
+
+## 0.1.5 全功能回归清单
+
+`QA-0.1.5.md` 逐项列出本轮验证与实际覆盖边界。完整 Qt 回归包含真实内核日志、HTTPS
+WebDAV、原生密码小眼睛、概览五种有效示例、YAML 覆写说明和 460px 长提示布局检查。
+
+`smoke_real_core.py` 增加混合/HTTP/SOCKS 真实流量、TCP/UDP 冲突、控制器冲突/重复/范围
+校验、保存失败原配置保留、离线保存与端口持久化、订阅强制更新及异常退出自动恢复。
+应用 HTTP 头保持原样，订阅下载使用中性 UA。
+
+系统代理测试可以使用环境已有 DBus/GLib，在独立会话总线上验证，避免修改宿主设置：
+
+```sh
+python3 tests/smoke_private_proxy.py --service build/dde-mihomo-daemon --core cores/amd64/mihomo
+```
+
+测试中的模拟 DDE 服务只存在于私有总线；GSettings 使用内存后端。覆盖手动/PAC 端口同步、
+显式关闭保持关闭、冲突不影响代理、绕过和完整恢复。无须为自测切换宿主 Clash。

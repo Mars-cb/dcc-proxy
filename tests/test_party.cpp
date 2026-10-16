@@ -23,11 +23,29 @@
 #include <QPersistentModelIndex>
 #include <QLabel>
 #include <QJSEngine>
+#include <QProcess>
+#include <DPasswordEdit>
+#include <DIconButton>
+#include <QNetworkProxy>
+#include <QDialog>
+#include <QMessageBox>
+#include <QSslSocket>
+#include <QSslError>
+#include <QTabWidget>
+#include <QScrollArea>
+#include <QSslCertificate>
+#include <QSslKey>
+#include <QSslConfiguration>
 #include <QPlainTextEdit>
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QUrlQuery>
 using namespace Party;
+static QString testCore()
+{
+    const auto bundled = QStringLiteral(PARTY_TEST_CORE);
+    return bundled.isEmpty() ? (QFile::exists("/usr/lib/dcc-proxy/mihomo") ? QString("/usr/lib/dcc-proxy/mihomo") : QString()) : bundled;
+}
 class TestFrame : public DCC_NAMESPACE::FrameProxyInterface {
 public:
     QWidget host;
@@ -48,9 +66,345 @@ public:
     void updateSearchData(const QString &) override {}
     QString moduleDisplayName(const QString &) const override { return {}; }
 };
+class TestTlsServer : public QTcpServer {
+public:
+    QSslCertificate certificate;
+    QSslKey key;
+protected:
+    void incomingConnection(qintptr descriptor) override {
+        auto *socket = new QSslSocket(this);
+        socket->setLocalCertificate(certificate); socket->setPrivateKey(key);
+        socket->setPeerVerifyMode(QSslSocket::VerifyNone);
+        socket->setProtocol(QSsl::TlsV1_2);
+        connect(socket, QOverload<QAbstractSocket::SocketError>::of(&QSslSocket::error), socket, [socket](QAbstractSocket::SocketError) { qWarning() << "Test TLS server error:" << socket->errorString(); });
+        connect(socket, QOverload<const QList<QSslError> &>::of(&QSslSocket::sslErrors), socket, [](const QList<QSslError> &errors) { for (const auto &e : errors) qWarning() << "Test TLS server:" << e.errorString(); });
+        if (!socket->setSocketDescriptor(descriptor)) { delete socket; return; }
+        addPendingConnection(socket); socket->startServerEncryption();
+    }
+};
 class PartyTests : public QObject {
     Q_OBJECT
 private slots:
+    void initTestCase() { QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy); }
+    void javascriptOverrideDnsAndProfileName()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("订阅名称", {}, "dns: {enable: true, nameserver: [1.1.1.1, 8.8.8.8]}\nrules: [\"MATCH,DIRECT\"]\n");
+        auto settings = store.settings(); settings["scriptEnabled"] = true; store.setSettings(settings);
+        const QByteArray script = R"JS(function main(config, profileName) {
+            if (!config.dns) config.dns = {};
+            if (!Array.isArray(config.dns.nameserver)) config.dns.nameserver = [];
+            const newDns = "10.20.0.10";
+            if (!config.dns.nameserver.includes(newDns)) config.dns.nameserver.unshift(newDns);
+            config["profile-name-fixture"] = profileName;
+            return config;
+        })JS";
+        writeFile(dir.path() + "/override.js", script);
+        auto runtime = parseConfig(store.runtime(id));
+        QCOMPARE(runtime["dns"]["nameserver"].size(), size_t(3));
+        QCOMPARE(runtime["dns"]["nameserver"][0].as<std::string>(), std::string("10.20.0.10"));
+        QCOMPARE(runtime["dns"]["nameserver"][1].as<std::string>(), std::string("1.1.1.1"));
+        QCOMPARE(runtime["dns"]["nameserver"][2].as<std::string>(), std::string("8.8.8.8"));
+        QCOMPARE(QString::fromStdString(runtime["profile-name-fixture"].as<std::string>()), QString("订阅名称"));
+        // Reapplying must preserve existing nameservers without inserting twice.
+        store.saveProfile("订阅名称", {}, emitYaml(runtime), id);
+        runtime = parseConfig(store.runtime(id));
+        QCOMPARE(runtime["dns"]["nameserver"].size(), size_t(3));
+        for (const QByteArray yaml : {QByteArray("rules: [\"MATCH,DIRECT\"]\n"), QByteArray("dns: {nameserver: invalid}\nrules: [\"MATCH,DIRECT\"]\n")}) {
+            store.saveProfile("订阅名称", {}, yaml, id);
+            runtime = parseConfig(store.runtime(id));
+            QCOMPARE(runtime["dns"]["nameserver"].size(), size_t(1));
+            QCOMPARE(runtime["dns"]["nameserver"][0].as<std::string>(), std::string("10.20.0.10"));
+        }
+        writeFile(dir.path() + "/override.js", "function main(c) { if (![NaN].includes(NaN) || ![1,2].includes(2,-1) || [1].includes(1,Infinity) || !Array.prototype.includes.call({0: 'x',length: 1}, 'x')) throw Error('includes semantics'); return c; }");
+        QVERIFY(!store.runtime(id).isEmpty());
+    }
+    void javascriptOverrideErrors()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("Fixture", {}, "rules: [\"MATCH,DIRECT\"]\n");
+        auto settings = store.settings(); settings["scriptEnabled"] = true; store.setSettings(settings);
+        const QList<QPair<QByteArray, QString>> cases = {
+            {"function main(c) {\n c.missing.call();\n}", "TypeError"},
+            {"function main(c) { throw 'explicit failure'; }", "explicit failure"},
+            {"function main(c) {", "SyntaxError"},
+            {"function main(c) { return null; }", "must return a configuration object"},
+            {"function main(c) { return []; }", "must return a configuration object"},
+            {"function main(c) {}", "must return a configuration object"},
+            {"function main(c) { c.circular = c; return c; }", "TypeError"},
+            {"function main(c) { return {then: function() {}}; }", "synchronously"}
+        };
+        for (const auto &test : cases) {
+            writeFile(dir.path() + "/override.js", test.first);
+            bool failed = false;
+            try { store.runtime(id); }
+            catch (const std::runtime_error &error) {
+                failed = true; const auto message = QString::fromUtf8(error.what());
+                QVERIFY2(message.contains(test.second), qPrintable(message));
+                if (test.second == "TypeError" || test.second == "SyntaxError") QVERIFY2(message.contains("override.js"), qPrintable(message));
+            }
+            QVERIFY2(failed, test.first.constData());
+        }
+        QProcess process; process.start(serviceExecutable(), {"--eval", dir.path() + "/override.js"});
+        QVERIFY(process.waitForStarted()); process.write("[]"); process.closeWriteChannel(); QVERIFY(process.waitForFinished());
+        QCOMPARE(process.exitCode(), 1); QVERIFY(process.readAllStandardError().contains("input must be a JSON configuration object"));
+    }
+    void proxyPortsRuntimeAndValidation()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("Fixture", {}, "mixed-port: 17890\nport: 17891\nsocks-port: 17892\nrules: [\"MATCH,DIRECT\"]\n");
+        writeFile(dir.path() + "/controlled.yaml", "mixed-port: 27890\nport: 27891\nsocks-port: 0\n");
+        writeFile(dir.path() + "/override.yaml", "mixed-port: 37890\nport: 37891\n");
+        writeFile(dir.path() + "/override.js", "function main(c) { c['mixed-port'] = 47890; return c; }");
+        auto settings = store.settings(); settings["scriptEnabled"] = true; store.setSettings(settings);
+        const auto config = parseConfig(store.runtime(id));
+        QCOMPARE(config["mixed-port"].as<int>(), 27890);
+        QCOMPARE(config["port"].as<int>(), 27891);
+        QCOMPARE(config["socks-port"].as<int>(), 0);
+        QCOMPARE(validateProxyPorts({{"mixed-port", 27890}, {"port", 0}})["mixed-port"].toInt(), 27890);
+        for (const auto &ports : QList<QJsonObject>{{}, {{"mixed-port", 0}}, {{"port", -1}}, {{"port", 65536}},
+            {{"port", 1.5}}, {{"port", "17890"}}, {{"unknown", 8}}, {{"mixed-port", 8}, {"port", 8}}})
+            QVERIFY_EXCEPTION_THROWN(validateProxyPorts(ports), std::runtime_error);
+    }
+    void proxyPortsUiSavesAndRestores()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        Store store; writeFile(dir.path() + "/controlled.yaml", "mixed-port: 27890\nport: 27891\n");
+        QLocalServer ipc; QVERIFY(ipc.listen(dir.path() + "/service.sock"));
+        QJsonObject requested; bool fail = false;
+        connect(&ipc, &QLocalServer::newConnection, this, [&] {
+            while (auto *socket = ipc.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QLocalSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); if (!buffer->contains('\n')) return;
+                    const auto command = QJsonDocument::fromJson(*buffer).object();
+                    QJsonObject result{{"running", false}};
+                    if (command["action"].toString() == "ports") {
+                        requested = command["options"].toObject();
+                        if (fail) result["error"] = "端口已占用";
+                        else writeFile(dir.path() + "/controlled.yaml", QJsonDocument(requested).toJson());
+                    }
+                    QTimer::singleShot(30, socket, [socket, result] { socket->write(QJsonDocument(result).toJson(QJsonDocument::Compact) + '\n'); socket->flush(); socket->disconnectFromServer(); });
+                });
+            }
+        });
+        {
+            Panel panel; panel.show();
+            auto *mixed = panel.findChild<QSpinBox *>("proxy-mixed-port"); auto *http = panel.findChild<QSpinBox *>("proxy-port");
+            auto *apply = panel.findChild<QPushButton *>("apply-proxy-ports"); QVERIFY(mixed && http && apply);
+            QCOMPARE(mixed->value(), 27890); QCOMPARE(http->value(), 27891);
+            QCOMPARE(panel.findChild<QSpinBox *>("proxy-socks-port")->value(), 0);
+            mixed->setValue(37890); QTest::mouseClick(apply, Qt::LeftButton); QVERIFY(!apply->isEnabled());
+            QTRY_COMPARE(requested["mixed-port"].toInt(), 37890); QTRY_VERIFY(apply->isEnabled()); QCOMPARE(mixed->value(), 37890);
+            fail = true; mixed->setValue(47890); QTest::mouseClick(apply, Qt::LeftButton);
+            QTRY_COMPARE(requested["mixed-port"].toInt(), 47890); QTRY_VERIFY(apply->isEnabled()); QCOMPARE(mixed->value(), 37890);
+            panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void allApiPagesAndActions()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        Store store; auto settings = store.settings(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+        QList<QByteArray> requests;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); const int end = buffer->indexOf("\r\n\r\n"); if (end < 0) return;
+                    const auto match = QRegularExpression("Content-Length: (\\d+)", QRegularExpression::CaseInsensitiveOption).match(QString::fromUtf8(buffer->left(end)));
+                    if (match.hasMatch() && buffer->size() < end + 4 + match.captured(1).toInt()) return;
+                    requests.append(*buffer); QByteArray body = "{}";
+                    if (buffer->startsWith("GET /configs ")) body = R"({"mixed-port":17890,"mode":"rule"})";
+                    if (buffer->startsWith("GET /connections ")) body = R"({"connections":[{"id":"connection-1","metadata":{"host":"fixture.test","destinationPort":"80","network":"tcp"}}],"uploadTotal":1,"downloadTotal":2,"memory":3})";
+                    if (buffer->startsWith("GET /rules ")) body = R"({"rules":[{"type":"Domain","payload":"fixture.test","proxy":"DIRECT","extra":{"disabled":false}}]})";
+                    if (buffer->startsWith("GET /providers/proxies ")) body = R"({"providers":{"fixture /?#":{"vehicleType":"HTTP","proxies":[{"name":"DIRECT"}]}}})";
+                    if (buffer->startsWith("GET /providers/rules ")) body = R"({"providers":{"rules /?#":{"vehicleType":"HTTP","ruleCount":1}}})";
+                    if (buffer->startsWith("GET /logs?")) body = "{\"type\":\"info\",\"payload\":\"fixture log\"}\n";
+                    if (buffer->startsWith("GET /traffic ")) body = "{\"up\":1024,\"down\":2048}\n";
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                });
+            }
+        });
+        auto seen = [&](const QByteArray &prefix) { for (const auto &request : requests) if (request.startsWith(prefix)) return true; return false; };
+        {
+            Panel panel; panel.resize(1000, 900); panel.show();
+            auto click = [&](const QString &text) { for (auto *b : panel.findChildren<QPushButton *>()) if (b->text() == text) { QTest::mouseClick(b, Qt::LeftButton); return true; } return false; };
+            QTRY_VERIFY(seen("GET /traffic "));
+            auto *mode = panel.findChild<QComboBox *>("proxy-mode"); QVERIFY(mode);
+            mode->setCurrentIndex(mode->findData("direct")); QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_VERIFY(seen("PATCH /configs "));
+            QTRY_VERIFY(QFile::exists(dir.path() + "/controlled.yaml"));
+            QCOMPARE(parseConfig(readFile(dir.path() + "/controlled.yaml"))["mode"].as<std::string>(), std::string("direct"));
+            panel.openPage("Connections"); auto *connections = panel.findChild<QTableWidget *>("connections"); QTRY_COMPARE(connections->rowCount(), 1);
+            connections->selectRow(0); QVERIFY(click("关闭选中连接")); QTRY_VERIFY(seen("DELETE /connections/connection-1 "));
+            QVERIFY(click("关闭全部连接")); QTRY_VERIFY(seen("DELETE /connections "));
+            auto *search = panel.findChild<QLineEdit *>("connection-search"); search->setText("absent"); QTRY_COMPARE(connections->rowCount(), 0);
+            search->clear(); QTRY_COMPARE(connections->rowCount(), 1);
+            panel.openPage("Rules"); auto *rules = panel.findChild<QTableWidget *>("rules"); QTRY_COMPARE(rules->rowCount(), 1);
+            rules->selectRow(0); QVERIFY(click("启用 / 禁用规则")); QTRY_VERIFY(seen("PATCH /rules/disable "));
+            auto *ruleSearch = panel.findChild<QLineEdit *>("rule-search"); ruleSearch->setText("absent"); QTRY_COMPARE(rules->rowCount(), 0);
+            ruleSearch->clear(); QTRY_COMPARE(rules->rowCount(), 1);
+            panel.openPage("Providers"); auto *providers = panel.findChild<QTableWidget *>("providers"); QTRY_COMPARE(providers->rowCount(), 2);
+            int proxyRow = -1, ruleRow = -1;
+            for (int r = 0; r < providers->rowCount(); ++r) { if (providers->item(r, 1)->text().startsWith("fixture")) proxyRow = r; else ruleRow = r; }
+            providers->selectRow(proxyRow); QVERIFY(click("更新资源")); QTRY_VERIFY(seen("PUT /providers/proxies/fixture%20%2F%3F%23 "));
+            QTRY_COMPARE(providers->rowCount(), 2);
+            for (int r = 0; r < providers->rowCount(); ++r) if (providers->item(r, 1)->text().startsWith("fixture")) providers->selectRow(r);
+            QVERIFY(click("节点健康检查")); QTRY_VERIFY(seen("GET /providers/proxies/fixture%20%2F%3F%23/healthcheck "));
+            QTRY_COMPARE(providers->rowCount(), 2);
+            for (int r = 0; r < providers->rowCount(); ++r) if (providers->item(r, 1)->text().startsWith("rules")) ruleRow = r;
+            providers->selectRow(ruleRow); QVERIFY(click("更新资源")); QTRY_VERIFY(seen("PUT /providers/rules/rules%20%2F%3F%23 "));
+            QVERIFY(click("更新 GEO 数据")); QTRY_VERIFY(seen("POST /upgrade/geo "));
+            panel.openPage("Logs"); auto *logs = panel.findChild<QPlainTextEdit *>("core-logs"); QTRY_VERIFY(logs->toPlainText().contains("fixture log"));
+            auto *pause = panel.findChild<QCheckBox *>("pause-logs"); pause->setChecked(true); QVERIFY(click("清空")); QVERIFY(logs->toPlainText().isEmpty());
+            auto *level = panel.findChild<QComboBox *>("log-level"); level->setCurrentText("debug"); pause->setChecked(false); QTRY_VERIFY(seen("GET /logs?level=debug "));
+            panel.openPage("Tools"); QVERIFY(click("清除 dns 缓存")); QTRY_VERIFY(seen("POST /cache/dns/flush "));
+            QVERIFY(click("清除 fakeip 缓存")); QTRY_VERIFY(seen("POST /cache/fakeip/flush "));
+            QTimer closer; closer.setInterval(20); connect(&closer, &QTimer::timeout, this, [] { if (auto *d = qobject_cast<QDialog *>(QApplication::activeModalWidget())) d->reject(); }); closer.start();
+            QVERIFY(click("DNS 查询")); QTRY_VERIFY(seen("GET /dns/query?name=example.com&type=A ")); QTest::qWait(80); closer.stop();
+            panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void webdavHttpsBackupRoundTrip()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        const auto cert = dir.path() + "/cert.pem", key = dir.path() + "/key.pem";
+        QProcess openssl; openssl.start("openssl", {"req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"});
+        QVERIFY(openssl.waitForFinished()); QCOMPARE(openssl.exitCode(), 0);
+        TestTlsServer server; server.certificate = QSslCertificate(readFile(cert)); server.key = QSslKey(readFile(key), QSsl::Rsa);
+        QVERIFY(!server.certificate.isNull()); QVERIFY(!server.key.isNull());
+        const auto previousSsl = QSslConfiguration::defaultConfiguration(); auto ssl = previousSsl; ssl.setProtocol(QSsl::TlsV1_2); auto ca = ssl.caCertificates(); ca.append(server.certificate); ssl.setCaCertificates(ca); QSslConfiguration::setDefaultConfiguration(ssl);
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        QByteArray saved; bool authorized = false;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); const int end = buffer->indexOf("\r\n\r\n"); if (end < 0) return;
+                    const auto match = QRegularExpression("Content-Length: (\\d+)", QRegularExpression::CaseInsensitiveOption).match(QString::fromUtf8(buffer->left(end)));
+                    if (match.hasMatch() && buffer->size() < end + 4 + match.captured(1).toInt()) return;
+                    authorized = buffer->contains("Authorization: Basic " + QByteArray("fixture:password").toBase64());
+                    if (buffer->startsWith("PUT ")) saved = buffer->mid(end + 4);
+                    const auto body = buffer->startsWith("GET ") ? saved : QByteArray();
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                });
+            }
+        });
+        Store store; const auto id = store.saveProfile("WebDAV fixture", {}, "rules: [\"MATCH,DIRECT\"]\n");
+        {
+            Panel panel; panel.show(); panel.openPage("Settings");
+            for (auto *manager : panel.findChildren<QNetworkAccessManager *>())
+                connect(manager, &QNetworkAccessManager::sslErrors, this, [](QNetworkReply *, const QList<QSslError> &errors) { for (const auto &error : errors) qWarning() << "Test HTTPS client:" << error.errorString(); });
+            panel.findChild<QLineEdit *>("webdav-url")->setText(QString("https://localhost:%1/backup.json").arg(server.serverPort()));
+            panel.findChild<QLineEdit *>("webdav-user")->setText("fixture"); panel.findChild<QLineEdit *>("webdav-password")->setText("password");
+            auto click = [&](const QString &text) { for (auto *b : panel.findChildren<QPushButton *>()) if (b->text() == text) { QTest::mouseClick(b, Qt::LeftButton); return true; } return false; };
+            QVERIFY(click("上传备份")); QTRY_VERIFY2(!saved.isEmpty(), qPrintable(panel.findChild<QLabel *>("proxy-status")->text())); QVERIFY(authorized); QVERIFY(QJsonDocument::fromJson(saved).isObject());
+            store.removeProfile(id); QCOMPARE(store.profiles().size(), 0);
+            QTimer::singleShot(20, this, [] { if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click(); });
+            QVERIFY(click("下载并恢复")); QTRY_VERIFY2(store.profiles().size() == 1, qPrintable(panel.findChild<QLabel *>("proxy-status")->text())); QCOMPARE(store.profiles().first().toObject()["name"].toString(), QString("WebDAV fixture"));
+            panel.hide();
+        }
+        QSslConfiguration::setDefaultConfiguration(previousSsl);
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void helpExamplesPasswordAndResponsiveLayout()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        Store store; const auto id = store.saveProfile("Examples", {}, "rules: [\"MATCH,DIRECT\"]\n");
+        auto settings = store.settings(); settings["active"] = id; store.setSettings(settings);
+        const auto original = store.profile(id);
+        {
+            Panel panel; panel.resize(800, 700); panel.show();
+            auto click = [&](const QString &text) { for (auto *b : panel.findChildren<QPushButton *>()) if (b->text() == text) { QTest::mouseClick(b, Qt::LeftButton); return true; } return false; };
+            for (const auto &section : QStringList{"dns", "sniffer", "hosts", "listeners", "tunnels"}) {
+                QString help; QByteArray example;
+                QTimer::singleShot(30, this, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    if (!dialog) return;
+                    if (auto *label = dialog->findChild<QLabel *>("config-editor-help")) help = label->text();
+                    if (auto *edit = dialog->findChild<QPlainTextEdit *>("config-document-editor")) example = edit->toPlainText().toUtf8();
+                    dialog->reject();
+                });
+                QVERIFY(click(section.toUpper())); QVERIFY2(!help.isEmpty(), qPrintable(section)); QVERIFY(!example.isEmpty());
+                QVERIFY(parseConfig(example)[section.toStdString()]); QCOMPARE(store.profile(id), original);
+                const auto exampleFile = dir.path() + "/example.yaml";
+                auto config = parseConfig(example); config["mixed-port"] = 17890; config["rules"].push_back("MATCH,DIRECT");
+                writeFile(exampleFile, emitYaml(config));
+                if (!testCore().isEmpty()) {
+                    QProcess validator; validator.start(testCore(), {"-t", "-d", dir.path(), "-f", exampleFile});
+                    QVERIFY(validator.waitForFinished(10000)); QVERIFY2(validator.exitCode() == 0, validator.readAllStandardOutput().constData());
+                }
+            }
+            panel.openPage("Overrides");
+            auto *yaml = panel.findChild<QPlainTextEdit *>("yaml-override-editor"); QVERIFY(yaml); QVERIFY(!yaml->toPlainText().trimmed().isEmpty());
+            QVERIFY(panel.findChild<QLabel *>("yaml-override-help")->text().contains("列表整体替换"));
+            QVERIFY(parseConfig(yaml->toPlainText().toUtf8())["hosts"]);
+            QVERIFY(click("保存覆写")); QVERIFY(parseConfig(readFile(dir.path() + "/override.yaml"))["hosts"]);
+            panel.openPage("Settings"); auto *secret = panel.findChild<Dtk::Widget::DPasswordEdit *>("api-secret-field"); QVERIFY(secret);
+            QVERIFY(secret->echoButtonIsVisible()); QCOMPARE(secret->echoMode(), QLineEdit::Password);
+            QAbstractButton *eye = nullptr;
+            for (auto *button : secret->findChildren<QAbstractButton *>()) {
+                if (!button->inherits("QLineEditIconButton") && button->isVisible()) eye = button;
+            }
+            QVERIFY(eye);
+            QTest::mouseClick(eye, Qt::LeftButton); QCOMPARE(secret->echoMode(), QLineEdit::Normal);
+            QTest::mouseClick(eye, Qt::LeftButton); QCOMPARE(secret->echoMode(), QLineEdit::Password);
+            auto *status = panel.findChild<QLabel *>("proxy-status"); status->setText(QString(5000, QChar('x')) + QString("\n长错误说明").repeated(100));
+            panel.resize(460, 520); QTest::qWait(50);
+            auto *area = panel.findChild<QScrollArea *>("proxy-message-area"); auto *tabs = panel.findChild<QTabWidget *>(); QVERIFY(area && tabs);
+            QVERIFY2(area->height() <= status->fontMetrics().lineSpacing() * 3 + 8, qPrintable(QString::number(area->height())));
+            QVERIFY(tabs->height() >= 250);
+            QCOMPARE(panel.width(), 460);
+            secret->setEchoMode(QLineEdit::Normal); panel.hide(); QCOMPARE(secret->echoMode(), QLineEdit::Password);
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void logHistoryAppearsWithoutNewConnections()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        writeFile(dir.path() + "/daemon.log", "time=fixture level=info msg=\"core started\"\n");
+        {
+            Panel panel; panel.show(); panel.openPage("Logs");
+            auto *logs = panel.findChild<QPlainTextEdit *>("core-logs"); QVERIFY(logs); QVERIFY(logs->toPlainText().contains("core started"));
+            logs->clear(); panel.openPage("Overview"); panel.openPage("Logs"); QVERIFY(logs->toPlainText().isEmpty());
+            panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void realCoreLogsAndTraffic()
+    {
+        if (testCore().isEmpty()) QSKIP("Optional real-core test requires a bundled or installed core");
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        QTcpServer controllerProbe, mixedProbe, target; QVERIFY(controllerProbe.listen(QHostAddress::LocalHost)); QVERIFY(mixedProbe.listen(QHostAddress::LocalHost)); QVERIFY(target.listen(QHostAddress::LocalHost));
+        const int controller = controllerProbe.serverPort(), mixed = mixedProbe.serverPort(); controllerProbe.close(); mixedProbe.close();
+        Store store; const auto id = store.saveProfile("Real logs", {}, QString("mixed-port: %1\nlog-level: info\nrules: [\"MATCH,DIRECT\"]\n").arg(mixed).toUtf8());
+        auto settings = store.settings(); settings["active"] = id; settings["endpoint"] = QString("http://127.0.0.1:%1").arg(controller); settings["core"] = testCore(); settings["autoSystemProxy"] = false; settings["updateMinutes"] = 0; store.setSettings(settings);
+        QProcess daemon;
+        const auto cleanup = QSharedPointer<int>(new int, [&](int *value) { daemon.terminate(); daemon.waitForFinished(5000); if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv); delete value; });
+        daemon.start(serviceExecutable(), {"--daemon"}); QVERIFY(daemon.waitForStarted()); QTRY_VERIFY(QFile::exists(dir.path() + "/service.sock"));
+        QProcess starter; starter.start(serviceExecutable(), {"--command", "start"}); QVERIFY(starter.waitForFinished(20000));
+        const auto result = QJsonDocument::fromJson(starter.readAllStandardOutput()).object(); QVERIFY2(result["running"].toBool() && result["error"].toString().isEmpty(), qPrintable(QString::fromUtf8(QJsonDocument(result).toJson())));
+        connect(&target, &QTcpServer::newConnection, this, [&] { while (auto *socket = target.nextPendingConnection()) {
+            connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+            connect(socket, &QTcpSocket::readyRead, socket, [socket] { socket->readAll(); socket->write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"); socket->disconnectFromHost(); });
+        }});
+        Panel panel; panel.show(); panel.openPage("Logs");
+        auto *logs = panel.findChild<QPlainTextEdit *>("core-logs"); QVERIFY(logs);
+        QTRY_VERIFY(logs->toPlainText().contains("Initial configuration") || logs->toPlainText().contains("Mixed(http+socks) proxy listening"));
+        // Open the true Mihomo HTTP log stream before producing proxy traffic.
+        QTest::qWait(300); const auto previous = logs->toPlainText();
+        QNetworkAccessManager client; client.setProxy(QNetworkProxy(QNetworkProxy::HttpProxy, "127.0.0.1", mixed));
+        auto *reply = client.get(QNetworkRequest(QUrl(QString("http://127.0.0.1:%1/log-fixture").arg(target.serverPort()))));
+        QTRY_VERIFY(reply->isFinished()); QCOMPARE(reply->error(), QNetworkReply::NoError); QCOMPARE(reply->readAll(), QByteArray("ok")); reply->deleteLater();
+        QTRY_VERIFY(logs->toPlainText() != previous); QTRY_VERIFY(logs->toPlainText().contains("DIRECT"));
+        panel.findChild<QComboBox *>("log-level")->setCurrentText("debug");
+        QTRY_VERIFY(QFile::exists(dir.path() + "/controlled.yaml"));
+        QTRY_COMPARE(parseConfig(readFile(dir.path() + "/controlled.yaml"))["log-level"].as<std::string>(), std::string("debug"));
+        panel.hide();
+    }
     void clashTunDefaultsAndRuntime()
     {
         QTemporaryDir dir; Store store(dir.path());
@@ -345,7 +699,7 @@ private slots:
             QCOMPARE(profile["url"].toString(), source);
             QCOMPARE(profiles->item(0, 1)->text(), source);
             QCOMPARE(parseConfig(store.profile(profile["id"].toString()))["proxies"].size(), size_t(1));
-            QVERIFY(subscriptionRequest.contains("User-Agent: mihomo.party/v2.0.3 (clash.meta)"));
+            QVERIFY(subscriptionRequest.contains("User-Agent: Mozilla/5.0"));
             QCOMPARE(profile["suggestedUpdateMinutes"].toInt(), 720);
             panel.openPage("Proxies");
             auto *nodes = panel.findChild<QListWidget *>("proxy-nodes"); QTRY_COMPARE(nodes->count(), 1);

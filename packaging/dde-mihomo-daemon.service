@@ -1,5 +1,5 @@
 [Unit]
-Description=Clash Party control center background service
+Description=Private proxy control center background service
 After=network.target
 
 [Service]

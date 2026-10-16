@@ -328,6 +328,21 @@ int localProxyPort(const Store &store)
         return port > 0 && port <= 65535 ? port : 0;
     } catch (...) { return 0; }
 }
+QStringList proxyPortKeys() { return {"mixed-port", "port", "socks-port", "redir-port", "tproxy-port"}; }
+QJsonObject validateProxyPorts(const QJsonObject &ports)
+{
+    if (ports.isEmpty()) fail("请填写代理端口");
+    const auto keys = proxyPortKeys(); QSet<int> used;
+    for (auto it = ports.begin(); it != ports.end(); ++it) {
+        const int port = it.value().toInt(-1);
+        if (!keys.contains(it.key()) || !it.value().isDouble() || it.value().toDouble() != port ||
+            port < (it.key() == "mixed-port" ? 1 : 0) || port > 65535)
+            fail("无效的代理端口：" + it.key());
+        if (port && used.contains(port)) fail(QString("代理端口 %1 重复，请为不同监听设置不同端口").arg(port));
+        if (port) used.insert(port);
+    }
+    return ports;
+}
 QByteArray Store::runtime(const QString &id) const
 {
     auto node = parseConfig(profile(id));
@@ -336,15 +351,22 @@ QByteArray Store::runtime(const QString &id) const
     if (!node["mixed-port"]) node["mixed-port"] = 17890;
     // Base geodata is supplied offline; updates remain an explicit user action.
     node["geo-auto-update"] = false;
+    if (!node["global-ua"]) node["global-ua"] = "Mozilla/5.0";
     // Clash Party v2.0.3 controls unified-delay and enables it by default.
     node["unified-delay"] = true;
+    if (!node["log-level"]) node["log-level"] = "info";
     if (QFile::exists(m_root + "/controlled.yaml"))
         node = mergeYaml(node, parseConfig(readFile(m_root + "/controlled.yaml")));
     if (s.value("overrideEnabled").toBool(true) && QFile::exists(m_root + "/override.yaml"))
         node = mergeYaml(node, parseConfig(readFile(m_root + "/override.yaml")));
     if (s.value("scriptEnabled").toBool(false) && QFile::exists(m_root + "/override.js")) {
         QProcess process;
-        process.start(serviceExecutable(), {"--eval", m_root + "/override.js"});
+        QString profileName;
+        for (const auto &entry : profiles()) {
+            const auto record = entry.toObject();
+            if (record["id"].toString() == id) { profileName = record["name"].toString(); break; }
+        }
+        process.start(serviceExecutable(), {"--eval", m_root + "/override.js", profileName});
         if (!process.waitForStarted(1000)) fail("Cannot start override evaluator");
         process.write(QJsonDocument(yamlToJson(node).toObject()).toJson(QJsonDocument::Compact));
         process.closeWriteChannel();
@@ -354,6 +376,10 @@ QByteArray Store::runtime(const QString &id) const
     }
     // Clash Party applies the controlled TUN defaults after subscription overrides.
     auto controlled = QFile::exists(m_root + "/controlled.yaml") ? parseConfig(readFile(m_root + "/controlled.yaml")) : YAML::Node(YAML::NodeType::Map);
+    // Explicit listener controls have the same final precedence as TUN controls.
+    for (const auto &key : proxyPortKeys())
+        if (controlled[key.toStdString()]) node[key.toStdString()] = controlled[key.toStdString()];
+    if (controlled["log-level"]) node["log-level"] = controlled["log-level"];
     auto tun = defaultTunConfig();
     if (controlled["tun"]) tun = mergeYaml(tun, controlled["tun"]);
     node["tun"] = node["tun"] ? mergeYaml(node["tun"], tun) : tun;

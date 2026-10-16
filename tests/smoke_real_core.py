@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import signal
 import socket
 import subprocess
 import tempfile
@@ -24,8 +25,16 @@ def free_port():
 
 
 class Target(http.server.BaseHTTPRequestHandler):
+    headers_seen = {}
+    subscription = b""
+    subscription_user_agent = ""
     def do_GET(self):
-        body = b"dcc-proxy-real-core-ok"
+        Target.headers_seen = dict(self.headers)
+        if self.path == "/subscription":
+            body = Target.subscription
+            Target.subscription_user_agent = self.headers.get("User-Agent", "")
+        else:
+            body = b"dcc-proxy-real-core-ok"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -93,7 +102,7 @@ def main():
         def through_proxy():
             conn = http.client.HTTPConnection("127.0.0.1", mixed, timeout=3)
             try:
-                conn.request("GET", "http://127.0.0.1:%d/test" % target.server_port)
+                conn.request("GET", "http://127.0.0.1:%d/test" % target.server_port, headers={"User-Agent": "FixtureBrowser/1.0", "X-Fixture": "preserve"})
                 return conn.getresponse().read()
             finally:
                 conn.close()
@@ -123,7 +132,9 @@ def main():
             api(path, "PUT", {"name": "DIRECT"})
             assert api(path)["now"] == "DIRECT"
             assert through_proxy() == b"dcc-proxy-real-core-ok"
-            print("PASS DIRECT selection routes actual HTTP traffic")
+            assert Target.headers_seen.get("User-Agent") == "FixtureBrowser/1.0" and Target.headers_seen.get("X-Fixture") == "preserve", Target.headers_seen
+            assert not any(label in str(Target.headers_seen).lower() for label in ("clash", "verge", "mihomo", "party"))
+            print("PASS DIRECT selection routes actual HTTP traffic and preserves application headers without injected software labels")
             api(path, "PUT", {"name": "REJECT"})
             assert api(path)["now"] == "REJECT"
             rejected = False
@@ -165,6 +176,88 @@ def main():
             api("/configs", "PATCH", {"mode": "direct"})
             assert api("/configs")["mode"] == "direct"
             print("PASS runtime mode change")
+            new_mixed, http_port, socks_port = free_port(), free_port(), free_port()
+            options = {"mixed-port": new_mixed, "port": http_port, "socks-port": socks_port,
+                       "redir-port": 0, "tproxy-port": 0}
+            changed = command({"action": "ports", "options": options})
+            assert changed.get("running") and not changed.get("error"), changed
+            mixed = new_mixed
+            live = api("/configs")
+            for key in ("mixed-port", "port", "socks-port"):
+                assert live[key] == options[key], live
+            assert through_proxy() == b"dcc-proxy-real-core-ok"
+            proxy_http = http.client.HTTPConnection("127.0.0.1", http_port, timeout=3)
+            proxy_http.request("GET", "http://127.0.0.1:%d/test" % target.server_port)
+            assert proxy_http.getresponse().read() == b"dcc-proxy-real-core-ok"; proxy_http.close()
+            with socket.create_connection(("127.0.0.1", socks_port), timeout=3) as socks:
+                socks.sendall(b"\x05\x01\x00"); assert socks.recv(2) == b"\x05\x00"
+                socks.sendall(b"\x05\x01\x00\x01\x7f\x00\x00\x01" + target.server_port.to_bytes(2, "big"))
+                handshake = b""
+                while len(handshake) < 10: handshake += socks.recv(10-len(handshake))
+                assert handshake[:2] == b"\x05\x00", handshake
+                socks.sendall(b"GET /test HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                response = b""
+                while True:
+                    data = socks.recv(4096)
+                    if not data: break
+                    response += data
+                assert response.endswith(b"dcc-proxy-real-core-ok"), response
+            print("PASS port controls change mixed/HTTP/SOCKS listeners and route actual traffic")
+            original_pid = command({"action": "status"})["pid"]
+            controlled = (root / "controlled.yaml").read_bytes()
+            for transport in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                with socket.socket(socket.AF_INET, transport) as occupied:
+                    occupied.bind(("127.0.0.1", 0))
+                    if transport == socket.SOCK_STREAM: occupied.listen(1)
+                    bad = dict(options); key = "port" if transport == socket.SOCK_STREAM else "mixed-port"
+                    bad[key] = occupied.getsockname()[1]
+                    conflict = command({"action": "ports", "options": bad})
+                    assert conflict.get("error") and "已被其他程序占用" in conflict["error"], conflict
+                    assert command({"action": "status"})["pid"] == original_pid
+                    assert (root / "controlled.yaml").read_bytes() == controlled
+                    assert through_proxy() == b"dcc-proxy-real-core-ok"
+            for bad in ({"mixed-port": controller}, {"mixed-port": http_port, "port": http_port},
+                        {"mixed-port": 0}, {"port": 65536}, {"port": 1.5}):
+                invalid = command({"action": "ports", "options": bad})
+                assert invalid.get("error"), invalid
+                assert command({"action": "status"})["pid"] == original_pid
+                assert (root / "controlled.yaml").read_bytes() == controlled
+            print("PASS TCP/UDP conflicts, duplicate/controller/out-of-range ports preserve the running core and saved configuration")
+            assert not command({"action": "stop"})["running"]
+            offline = command({"action": "ports", "options": {"mixed-port": new_mixed, "port": 0, "socks-port": 0}})
+            assert not offline.get("error") and not offline["running"], offline
+            assert command({"action": "start"})["running"]
+            assert api("/configs")["port"] == 0 and api("/configs")["socks-port"] == 0
+            assert through_proxy() == b"dcc-proxy-real-core-ok"
+            print("PASS offline port save, optional listener disable and persistence across restart")
+            records = json.loads((root / "profiles.json").read_text())
+            records["profiles"][0].update({"url": "http://127.0.0.1:%d/subscription" % target.server_port,
+                                            "updated": "1970-01-01T00:00:00Z"})
+            (root / "profiles.json").write_text(json.dumps(records))
+            Target.subscription = config.encode()
+            before_update_pid = command({"action": "status"})["pid"]
+            assert command({"action": "update"}).get("ok")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                metadata = json.loads((root / "profiles.json").read_text())["profiles"][0]
+                state = command({"action": "status"})
+                if metadata.get("updated") != "1970-01-01T00:00:00Z" and state.get("running") and state.get("pid") != before_update_pid and not state.get("busy"):
+                    break
+                time.sleep(.1)
+            else: raise AssertionError("Active subscription update did not finish")
+            assert Target.subscription_user_agent == "Mozilla/5.0", Target.subscription_user_agent
+            assert through_proxy() == b"dcc-proxy-real-core-ok"
+            print("PASS subscription refresh uses a neutral User-Agent, preserves controlled ports and applies the active configuration")
+            crashed_pid = command({"action": "status"})["pid"]
+            os.kill(crashed_pid, signal.SIGKILL)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                state = command({"action": "status"})
+                if state.get("running") and state.get("pid") != crashed_pid and not state.get("busy"):
+                    assert through_proxy() == b"dcc-proxy-real-core-ok"; break
+                time.sleep(.1)
+            else: raise AssertionError("Unexpected kernel crash did not recover")
+            print("PASS unexpected kernel exit restarts the managed core and restores actual proxy traffic")
             assert not command({"action": "stop"})["running"]
             print("PASS stop releases managed core")
         finally:

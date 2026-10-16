@@ -11,3 +11,5 @@
 /debian/*.debhelper.log
 /debian/dcc-proxy/
 /debian/dcc-proxy-dbgsym/
+
+__pycache__/

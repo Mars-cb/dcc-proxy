@@ -21,6 +21,7 @@ class QAbstractButton;
 
 namespace Party {
 class NodeList;
+class MessageArea;
 class Panel : public QWidget {
     Q_OBJECT
 public:
@@ -65,11 +66,13 @@ private:
     void backgroundCommand(const QJsonObject &command, Api::Done extra = {});
     void saveSettings();
     void loadSettings();
+    void loadPortSettings();
     void patchConfig(const QJsonObject &patch);
     void editSection(const QString &section);
-    void editDocument(const QString &title, const QByteArray &data, std::function<void(QByteArray)> save);
+    void editDocument(const QString &title, const QByteArray &data, std::function<void(QByteArray)> save, const QString &help = {}, const QByteArray &example = {});
     void fetchProfiles(const QUrl &url, const QString &name, const QString &id = {});
     void syncStreams();
+    void loadLogHistory();
     void resourceAction(bool health);
     void systemProxy(const QString &mode);
     void webdav(bool upload);
@@ -81,6 +84,7 @@ private:
     QTimer m_refreshTimer;
     QTabWidget *m_tabs;
     QLabel *m_status;
+    MessageArea *m_messageArea;
     QLabel *m_overview;
     QLabel *m_traffic;
     QLabel *m_statistics;
@@ -121,11 +125,15 @@ private:
     QLineEdit *m_ruleSearch;
     QTableWidget *m_providers;
     QPlainTextEdit *m_logs;
+    QLabel *m_logStatus;
+    bool m_logHistoryLoaded = false;
     QCheckBox *m_pauseLogs;
     QComboBox *m_logLevel;
     QLineEdit *m_endpoint;
     QLineEdit *m_secret;
     QLineEdit *m_corePath;
+    QMap<QString, QSpinBox *> m_proxyPorts;
+    QPushButton *m_applyPorts;
     QCheckBox *m_autoStart;
     QCheckBox *m_systemNodeDns;
     QCheckBox *m_autoSystemProxy;

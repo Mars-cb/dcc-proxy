@@ -22,6 +22,8 @@ QByteArray emitYaml(const YAML::Node &node);
 QJsonValue yamlToJson(const YAML::Node &node);
 QByteArray backup(const QString &root);
 void restore(const QString &root, const QByteArray &bytes);
+QStringList proxyPortKeys();
+QJsonObject validateProxyPorts(const QJsonObject &ports);
 QStringList defaultProxyBypass();
 QStringList normalizeProxyBypass(const QStringList &entries);
 QByteArray proxyPac(int port, const QStringList &entries);

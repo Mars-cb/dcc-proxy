@@ -129,6 +129,25 @@ def main():
             restarted = ok(action='restart', profile=profile)
             assert restarted['running']
             assert dbus('GetProxy', 'https').splitlines() == ['127.0.0.1', str(new_mixed)]
+            changed = free_port()
+            assert ok(action='ports', options={'mixed-port': changed})['running']
+            assert dbus('GetProxy', 'https').splitlines() == ['127.0.0.1', str(changed)]
+            ok(action='proxy', mode='auto', port=changed)
+            changed_again = free_port()
+            assert ok(action='ports', options={'mixed-port': changed_again})['running']
+            assert dbus('GetProxyMethod') == 'auto'
+            assert ('127.0.0.1:%d' % changed_again) in pac()
+            with socket.socket() as occupied:
+                occupied.bind(('127.0.0.1', 0)); occupied.listen(1)
+                expected = state(); pid = command(action='status')['pid']
+                failed = command(action='ports', options={'mixed-port': occupied.getsockname()[1]})
+                assert failed.get('error') and state() == expected
+                assert command(action='status')['pid'] == pid
+            ok(action='proxy', mode='none', port=0)
+            assert state() == before
+            assert ok(action='ports', options={'mixed-port': free_port()})['running']
+            assert state() == before, 'Changing listeners while proxy disabled must leave it disabled'
+            print('PASS: port controls update owned manual/PAC proxies, reject conflicts and preserve explicit proxy-off')
             assert not ok(action='stop')['running']
             assert state() == before
             assert not (root/'system-proxy-before.json').exists()
