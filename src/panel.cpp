@@ -248,7 +248,7 @@ QWidget *Panel::tunPage()
         if (m_tunBusy) return;
         guarded([this] {
             const auto core = m_store.settings()["core"].toString();
-            if (hasTunPermission(core)) { message(tr("内核已具备虚拟网卡权限")); return; }
+            if (hasTunPermission(core)) { message(tr("内核文件已授权；首次启用时会自动重启未获得权限的内核进程")); return; }
             m_tunBusy = true; m_tunPageSwitch->setEnabled(false);
             requestTunPermission(core, this, [this](QString error) { m_tunBusy = false; message(error.isEmpty() ? tr("内核授权成功，可启用虚拟网卡") : error, !error.isEmpty()); refresh(); });
         });

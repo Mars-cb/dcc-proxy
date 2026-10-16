@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+# Preserve an administrator's existing TUN grant across replacement of the core.
+# A fresh installation never grants setuid automatically.
+core=/usr/lib/dcc-proxy/mihomo
+marker=/var/lib/dcc-proxy/restore-tun-grant
+if [ "$1" = upgrade ] && [ -f "$core" ] && [ ! -L "$core" ] && [ -u "$core" ] && [ "$(stat -c %u "$core")" = 0 ]; then
+    install -d -m 0755 /var/lib/dcc-proxy
+    touch "$marker"
+fi
+#DEBHELPER#

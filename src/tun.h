@@ -7,5 +7,6 @@ YAML::Node defaultTunConfig();
 YAML::Node defaultTunDns();
 QJsonObject validateTunOptions(const QJsonObject &options);
 bool hasTunPermission(const QString &core);
+bool processHasTunPermission(qint64 pid);
 void requestTunPermission(const QString &core, QObject *context, std::function<void(QString)> done);
 }

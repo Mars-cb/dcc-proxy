@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+core=/usr/lib/dcc-proxy/mihomo
+marker=/var/lib/dcc-proxy/restore-tun-grant
+if [ "$1" = configure ] && [ -f "$marker" ]; then
+    if [ -f "$core" ] && [ ! -L "$core" ] && [ "$(stat -c %u "$core")" = 0 ]; then
+        chmod u+s "$core"
+    fi
+    rm -f "$marker"
+    rmdir /var/lib/dcc-proxy 2>/dev/null || true
+fi
+#DEBHELPER#

@@ -67,6 +67,20 @@ bool hasTunPermission(const QString &core)
     const auto name = QFile::encodeName(core);
     return ::stat(name.constData(), &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == 0 && (info.st_mode & S_ISUID);
 }
+bool processHasTunPermission(qint64 pid)
+{
+    if (pid <= 0) return false;
+    QFile status(QString("/proc/%1/status").arg(pid));
+    if (!status.open(QIODevice::ReadOnly)) return false;
+    for (const auto &line : status.readAll().split('\n')) {
+        if (!line.startsWith("CapEff:")) continue;
+        bool ok = false;
+        const auto capabilities = line.mid(7).trimmed().toULongLong(&ok, 16);
+        // CAP_NET_ADMIN is required by TUNSETIFF and route configuration.
+        return ok && (capabilities & (quint64(1) << 12));
+    }
+    return false;
+}
 static void pkexec(QObject *context, const QStringList &arguments, std::function<void(QString)> done)
 {
     auto *process = new QProcess(context);

@@ -149,7 +149,8 @@ private:
         return {{"running", m_core.state() == QProcess::Running}, {"pid", double(m_core.processId())},
                 {"profile", m_profile}, {"error", m_error}, {"busy", m_busy},
                 {"tun", QJsonObject{{"enable", m_tunEnabled && QNetworkInterface::interfaceFromName(m_tunDevice).isValid()},
-                                     {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.settings()["core"].toString())}}}};
+                                     {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.settings()["core"].toString())},
+                                     {"processPermission", processHasTunPermission(m_core.processId())}}}};
     }
     void stopCore(bool restoreProxy = true)
     {
@@ -357,6 +358,8 @@ private:
             answer({{"error", "启用虚拟网卡需要先授权内核"}, {"needsAuthorization", true}}); return;
         }
         const bool running = m_core.state() == QProcess::Running;
+        // chmod/setuid affects the next exec, never an already-running process.
+        const bool needsPrivilegeRestart = enable && running && !processHasTunPermission(m_core.processId());
         if (enable) {
             const auto device = QString::fromStdString(tun["device"].as<std::string>());
             const bool owned = running && m_expectedTun["enable"].toBool() && m_tunDevice == device;
@@ -386,7 +389,7 @@ private:
                 } else { m_error = error; answer(result); }
             } catch (const std::exception &e) { m_busy = false; m_error = error + "\n恢复配置失败：" + QString::fromUtf8(e.what()); answer({{"error", m_error}}); }
         };
-        try { startCore(id, complete, false, true, true); }
+        try { startCore(id, complete, false, true, !needsPrivilegeRestart); }
         catch (...) { restore(); throw; }
     }
     void repairTun(Answer answer)

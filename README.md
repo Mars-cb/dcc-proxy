@@ -15,14 +15,14 @@ UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模�
 ```sh
 cd /data/work/dcc-proxy
 dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../dcc-proxy_0.1.2_$(dpkg --print-architecture).deb
+sudo dpkg -i ../dcc-proxy_0.1.3_$(dpkg --print-architecture).deb
 ```
 
 也可继续使用 CPack 脚本（产物位于 `dist/`）：
 
 ```sh
 ./tools/build-deb.sh
-sudo dpkg -i dist/dcc-proxy_0.1.2_$(dpkg --print-architecture).deb
+sudo dpkg -i dist/dcc-proxy_0.1.3_$(dpkg --print-architecture).deb
 ```
 
 两种方式共用 `tools/prepare-core.sh`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；
@@ -84,7 +84,9 @@ Linux 的通配符与 Clash Party 一致，只支持开头的 `*.`，不支持 `
 网卡 Mihomo、Mixed、自动路由与出口检测开启、自动重定向关闭、DNS 劫持 any:53、MTU 1500。
 各协议栈是否可用取决于所选内核；校验或创建失败时显示内核错误并恢复原配置。
 启用时联动开启 DNS，关闭 TUN 时保留 DNS；保存其它设置不会意外关闭 TUN。
-运行中的配置通过内核热加载应用，不重启进程；恢复唤醒 5 秒后重新加载配置。
+已获得网络管理权限的内核通过热加载应用设置，不重启进程；首次文件授权后，若当前进程
+仍没有 CAP_NET_ADMIN，会自动重启本插件自己的内核一次使授权生效。后续切换不重复鉴权，deb 升级时保留已有授权；首次安装不会自动授权。
+恢复唤醒 5 秒后重新加载配置。
 首次启用需要系统管理员认证，仅对 `/usr/lib/dcc-proxy/mihomo` 执行与 Linux Clash Party 相同的
 root 所有权和 setuid 授权。自定义内核需自行授权；已存在的同名网卡不会被接管。
 

@@ -143,11 +143,17 @@ def main():
                 assert response.read() == b'dcc-proxy-tun-dns-http-ok'
         try:
             wait_for(lambda: (root / 'service.sock').exists(), 'Service did not start')
+            deny_tun.touch()  # Start before authorization: child has no CAP_NET_ADMIN.
             result = command({'action': 'start'}); assert result.get('running') and not result.get('error'), result
             assert not command({'action': 'status'})['tun']['enable']
-            initial_pid = result['pid']
+            unprivileged_pid = result['pid']
+            assert not result['tun']['processPermission']
+            deny_tun.unlink()  # Simulate a completed file grant; the old child remains unprivileged.
             result = tun_options({'enable': True})
-            assert result['pid'] == initial_pid, 'TUN enable restarted the core'
+            assert result['pid'] != unprivileged_pid, 'New authorization did not restart the unprivileged core'
+            assert result['tun']['processPermission']
+            initial_pid = result['pid']
+            print('PASS: first authorization restarts the old unprivileged core and gains actual CAP_NET_ADMIN')
             assert result['tun']['enable'], result
             config = api('/configs'); assert config['tun']['enable'], config
             interface = json.loads(ip('-j', 'link', 'show', 'Mihomo'))[0]
@@ -183,7 +189,8 @@ def main():
             assert 'operation not permitted' in result['error'].lower(), result
             state = command({'action': 'status'})
             assert state['running'] and not state['tun']['enable'], state
-            assert state['pid'] == denied_pid, 'TUN failure restarted the working core'
+            assert state['pid'] != denied_pid, 'Missing permission did not attempt a fresh exec'
+            assert not state['tun']['processPermission']
             assert not api('/configs')['tun']['enable']
             assert ip('route', 'show', 'table', 'all') == baseline_routes
             assert ip('rule') == baseline_rules
