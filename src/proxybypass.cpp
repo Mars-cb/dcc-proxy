@@ -16,10 +16,18 @@ QStringList normalizeProxyBypass(const QStringList &entries)
     if (entries.size() > 512) throw std::runtime_error("代理绕过列表最多支持 512 项");
     QStringList out; QSet<QString> seen;
     const QRegularExpression domain("^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$");
+    int index = 0;
     for (auto entry : entries) {
+        ++index;
         entry = entry.trimmed();
         if (entry.isEmpty()) continue;
-        const auto invalid = [&] { throw std::runtime_error(("无效的代理绕过项：" + entry).toStdString()); };
+        const auto original = entry;
+        const auto invalid = [&] {
+            QString detail;
+            if (original.contains('*')) detail = "；仅支持开头的 *. 通配符，例如 *.uniontech.com，不支持末尾的通配符";
+            else if (original.contains("://")) detail = "；请填写域名，不要包含 URL 协议或路径";
+            throw std::runtime_error((QString("第 %1 项代理绕过无效：%2").arg(index).arg(original) + detail).toStdString());
+        };
         if (entry.size() > 253) invalid();
         if (entry.startsWith('[') && entry.endsWith(']')) entry = entry.mid(1, entry.size() - 2);
         QHostAddress address;

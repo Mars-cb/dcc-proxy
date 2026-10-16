@@ -17,6 +17,7 @@ class QTabWidget;
 class QSpinBox;
 class QCheckBox;
 class QPushButton;
+class QAbstractButton;
 
 namespace Party {
 class NodeList;
@@ -31,6 +32,10 @@ protected:
     void hideEvent(QHideEvent *event) override;
 private:
     QWidget *overviewPage();
+    QWidget *tunPage();
+    void loadTunSettings();
+    void setTunOptions(const QJsonObject &options);
+    void updateSwitches(const QJsonObject &state);
     QWidget *proxiesPage();
     QWidget *profilesPage();
     QWidget *connectionsPage();
@@ -53,7 +58,7 @@ private:
     void activateProfile();
     QJsonObject selectedProfile() const;
     void runService(const QString &action, const QString &profile = {});
-    void backgroundCommand(const QJsonObject &command);
+    void backgroundCommand(const QJsonObject &command, Api::Done extra = {});
     void saveSettings();
     void loadSettings();
     void patchConfig(const QJsonObject &patch);
@@ -74,8 +79,20 @@ private:
     QLabel *m_status;
     QLabel *m_overview;
     QLabel *m_traffic;
+    QLabel *m_statistics;
+    QAbstractButton *m_coreSwitch;
+    QPushButton *m_restart;
+    bool m_coreBusy = false;
+    bool m_tunBusy = false;
+    QAbstractButton *m_tunPageSwitch;
+    QLabel *m_tunStatus;
+    QLineEdit *m_tunDevice;
+    QComboBox *m_tunStack;
+    QSpinBox *m_tunMtu;
+    QLineEdit *m_tunDns;
+    QPlainTextEdit *m_tunExclude;
+    QMap<QString, QAbstractButton *> m_tunFlags;
     QComboBox *m_mode;
-    QCheckBox *m_tun;
     QComboBox *m_group;
     QLineEdit *m_nodeSearch;
     QComboBox *m_sort;

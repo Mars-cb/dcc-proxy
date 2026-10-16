@@ -1,5 +1,8 @@
 #include "config.h"
 #include "api.h"
+#include "tun.h"
+#include <QNetworkInterface>
+#include <QDBusConnection>
 #include <QCoreApplication>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -37,6 +40,7 @@ static int signalFds[2];
 static void stopSignal(int) { const char c = 1; const auto ignored = ::write(signalFds[0], &c, 1); Q_UNUSED(ignored) }
 
 class Daemon : public QObject {
+    Q_OBJECT
 public:
     Daemon() : m_store(), m_core(this), m_network(this), m_lock(dataDir() + "/daemon.lock")
     {
@@ -85,7 +89,25 @@ public:
             }
         });
         m_core.setProcessChannelMode(QProcess::MergedChannels);
-        connect(&m_core, &QProcess::readyRead, this, [this] { log(m_core.readAll()); });
+        connect(&m_core, &QProcess::readyRead, this, [this] {
+            const auto bytes = m_core.readAll(); log(bytes); m_coreLogBuffer += bytes;
+            int end;
+            while ((end = m_coreLogBuffer.indexOf('\n')) >= 0) {
+                const auto line = m_coreLogBuffer.left(end); m_coreLogBuffer.remove(0, end + 1);
+                if (line.contains("Start TUN listening error") || line.contains("configure tun interface: operation not permitted")) {
+                    m_tunError = QString::fromUtf8(line).right(1200);
+                    if (!m_busy) disableFailedTun(m_tunError);
+                }
+            }
+            if (m_coreLogBuffer.size() > 8192) m_coreLogBuffer = m_coreLogBuffer.right(4096);
+        });
+        m_resumeTimer.setSingleShot(true); m_resumeTimer.setInterval(5000);
+        connect(&m_resumeTimer, &QTimer::timeout, this, [this] {
+            if (m_core.state() == QProcess::Running && m_expectedTun.value("enable").toBool())
+                repairTun([this](QJsonObject result) { if (!result["error"].toString().isEmpty()) log(result["error"].toString().toUtf8() + '\n'); });
+        });
+        QDBusConnection::systemBus().connect("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+                                             "PrepareForSleep", this, SLOT(prepareForSleep(bool)));
         connect(&m_core, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) { m_error = m_core.errorString(); log(m_error.toUtf8()); });
         connect(&m_core, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             [this](int code, QProcess::ExitStatus exitStatus) {
@@ -125,10 +147,13 @@ private:
     QJsonObject status() const
     {
         return {{"running", m_core.state() == QProcess::Running}, {"pid", double(m_core.processId())},
-                {"profile", m_profile}, {"error", m_error}, {"busy", m_busy}};
+                {"profile", m_profile}, {"error", m_error}, {"busy", m_busy},
+                {"tun", QJsonObject{{"enable", m_tunEnabled && QNetworkInterface::interfaceFromName(m_tunDevice).isValid()},
+                                     {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.settings()["core"].toString())}}}};
     }
     void stopCore(bool restoreProxy = true)
     {
+        m_resumeTimer.stop(); m_tunEnabled = false;
         if (restoreProxy) {
             try { restoreSystemProxy(); } catch (const std::exception &e) { log(QByteArray(e.what()) + '\n'); }
             m_pacServer.close();
@@ -139,7 +164,7 @@ private:
         m_core.terminate();
         if (!m_core.waitForFinished(3000)) { m_core.kill(); m_core.waitForFinished(1000); }
     }
-    void completeStart(Answer answer, int attempt = 0)
+    void completeStart(Answer answer, int attempt = 0, bool preserveProxy = false)
     {
         const auto settings = m_store.settings();
         QUrl url(settings["endpoint"].toString()); url.setPath("/configs");
@@ -147,24 +172,37 @@ private:
         request.setRawHeader("Authorization", "Bearer " + settings["secret"].toString().toUtf8());
         auto *reply = m_network.get(request);
         QTimer::singleShot(500, reply, &QNetworkReply::abort);
-        connect(reply, &QNetworkReply::finished, this, [this, reply, answer, attempt] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, answer, attempt, preserveProxy] {
             reply->deleteLater();
             const auto document = QJsonDocument::fromJson(reply->readAll());
             const bool ready = m_core.state() == QProcess::Running && reply->error() == QNetworkReply::NoError && document.isObject();
             if (!ready) {
                 if (m_core.state() == QProcess::Running && attempt < 15) {
-                    QTimer::singleShot(100, this, [this, answer, attempt] { completeStart(answer, attempt + 1); });
+                    QTimer::singleShot(100, this, [this, answer, attempt, preserveProxy] { completeStart(answer, attempt + 1, preserveProxy); });
                     return;
                 }
                 m_busy = false; m_wanted = false; ++m_restartEpoch;
-                stopCore();
+                stopCore(!preserveProxy);
                 m_error = "内核启动失败：控制器未就绪，请检查日志和端口占用";
                 answer({{"error", m_error}});
                 return;
             }
             try {
                 auto current = m_store.settings();
-                const bool automatic = current.value("autoSystemProxy").toBool(true);
+                if (m_expectedTun.value("enable").toBool()) {
+                    const bool tunReady = document.object()["tun"].toObject()["enable"].toBool() &&
+                        QNetworkInterface::interfaceFromName(m_tunDevice).isValid();
+                    if (!tunReady && m_tunError.isEmpty() && attempt < 15) {
+                        QTimer::singleShot(100, this, [this, answer, attempt, preserveProxy] { completeStart(answer, attempt + 1, preserveProxy); });
+                        return;
+                    }
+                    if (!tunReady) {
+                        m_busy = false; disableFailedTun(m_tunError.isEmpty() ? "虚拟网卡未创建成功，请检查内核日志和权限" : m_tunError);
+                        auto result = status(); result["error"] = m_error; answer(result); return;
+                    }
+                    m_tunEnabled = true;
+                } else m_tunEnabled = false;
+                const bool automatic = !preserveProxy && current.value("autoSystemProxy").toBool(true);
                 current["active"] = m_profile;
                 m_store.setSettings(current);
                 if (automatic) {
@@ -174,7 +212,7 @@ private:
                     probe.connectToHost(QHostAddress::LocalHost, quint16(port));
                     if (!probe.waitForConnected(100)) {
                         if (attempt < 15) {
-                            QTimer::singleShot(100, this, [this, answer, attempt] { completeStart(answer, attempt + 1); });
+                            QTimer::singleShot(100, this, [this, answer, attempt, preserveProxy] { completeStart(answer, attempt + 1, preserveProxy); });
                             return;
                         }
                         throw std::runtime_error("内核混合端口未就绪，请检查端口占用和监听地址");
@@ -197,14 +235,16 @@ private:
                 answer(result);
             } catch (const std::exception &e) {
                 m_busy = false;
-                try { restoreSystemProxy(); } catch (...) { }
-                m_systemProxyMode.clear(); m_pacServer.close();
-                m_error = "内核已启动，但系统代理启用失败：" + QString::fromUtf8(e.what());
+                if (!preserveProxy) {
+                    try { restoreSystemProxy(); } catch (...) { }
+                    m_systemProxyMode.clear(); m_pacServer.close();
+                }
+                m_error = (preserveProxy ? "虚拟网卡操作失败：" : "内核已启动，但系统代理启用失败：") + QString::fromUtf8(e.what());
                 auto result = status(); result["error"] = m_error; answer(result);
             }
         });
     }
-    void startCore(const QString &id, Answer answer, bool recovery = false)
+    void startCore(const QString &id, Answer answer, bool recovery = false, bool preserveProxy = false, bool hotReload = false)
     {
         if (m_busy) { answer({{"error", "A core operation is in progress"}}); return; }
         const auto settings = m_store.settings();
@@ -213,7 +253,18 @@ private:
         const QString work = dataDir() + "/work";
         QDir().mkpath(work);
         const QString candidate = work + "/candidate.yaml";
-        writeFile(candidate, m_store.runtime(id));
+        auto runtime = parseConfig(m_store.runtime(id));
+        if (runtime["tun"]["enable"].as<bool>() && !hasTunPermission(core)) {
+            disableFailedTun("TUN 权限不足，已关闭虚拟网卡开关；请在虚拟网卡页面授权内核后启用");
+            runtime = parseConfig(m_store.runtime(id));
+        }
+        if (runtime["tun"]["enable"].as<bool>()) {
+            const auto device = QString::fromStdString(runtime["tun"]["device"].as<std::string>());
+            const bool owned = m_core.state() == QProcess::Running && m_expectedTun["enable"].toBool() && m_tunDevice == device;
+            if (!owned && QNetworkInterface::interfaceFromName(device).isValid())
+                throw std::runtime_error(("虚拟网卡 " + device + " 已存在，请更换名称，避免影响其他代理程序").toStdString());
+        }
+        writeFile(candidate, emitYaml(runtime));
         m_busy = true;
         auto *validator = new QProcess(this);
         validator->setProcessChannelMode(QProcess::MergedChannels);
@@ -223,7 +274,7 @@ private:
         validator->setProcessEnvironment(env);
         QTimer::singleShot(120000, validator, [validator] { if (validator->state() != QProcess::NotRunning) validator->kill(); });
         auto complete = QSharedPointer<bool>::create(false);
-        auto finish = [this, validator, complete, core, work, candidate, id, answer, env, recovery](bool success) {
+        auto finish = [this, validator, complete, core, work, candidate, id, answer, env, recovery, preserveProxy, hotReload](bool success) {
             if (*complete) return;
             *complete = true;
             const auto output = QString::fromUtf8(validator->readAll()).right(2000);
@@ -250,7 +301,16 @@ private:
                     }
                 }
                 writeFile(work + "/config.yaml", readFile(candidate));
+                m_tunError.clear(); m_coreLogBuffer.clear();
+                if (hotReload && m_core.state() == QProcess::Running) {
+                    m_expectedTun = yamlToJson(config["tun"]).toObject();
+                    m_tunDevice = m_expectedTun["device"].toString();
+                    reloadRuntime(answer);
+                    return;
+                }
                 stopCore(false);
+                m_expectedTun = yamlToJson(config["tun"]).toObject();
+                m_tunDevice = m_expectedTun["device"].toString();
                 m_profile = id;
                 m_error.clear();
                 if (!recovery) m_failures = 0;
@@ -259,9 +319,9 @@ private:
                 m_core.setWorkingDirectory(work);
                 m_core.start(core, {"-d", work, "-f", work + "/config.yaml"});
                 if (!m_core.waitForStarted(2000)) throw std::runtime_error(m_core.errorString().toStdString());
-                completeStart(answer);
+                completeStart(answer, 0, preserveProxy);
             } catch (const std::exception &e) {
-                m_busy = false; m_wanted = false; ++m_restartEpoch; stopCore();
+                m_busy = false; m_wanted = false; ++m_restartEpoch; stopCore(!preserveProxy);
                 m_error = QString::fromUtf8(e.what()); answer({{"error", m_error}});
             }
         };
@@ -270,10 +330,92 @@ private:
         connect(validator, &QProcess::errorOccurred, this, [finish](QProcess::ProcessError e) { if (e == QProcess::FailedToStart) finish(false); });
         validator->start(core, {"-t", "-d", work, "-f", candidate});
     }
+    void disableFailedTun(const QString &reason)
+    {
+        m_tunEnabled = false; m_expectedTun["enable"] = false; m_error = reason;
+        const auto path = dataDir() + "/controlled.yaml";
+        auto controlled = QFile::exists(path) ? parseConfig(readFile(path)) : YAML::Node(YAML::NodeType::Map);
+        controlled["tun"]["enable"] = false;
+        writeFile(path, emitYaml(controlled));
+        log(reason.toUtf8() + '\n');
+    }
+    void configureTun(const QJsonObject &input, Answer answer)
+    {
+        if (m_busy) { answer({{"error", "内核正在操作，请稍候"}}); return; }
+        const auto patch = validateTunOptions(input);
+        const auto path = dataDir() + "/controlled.yaml";
+        const bool existed = QFile::exists(path);
+        const auto oldBytes = existed ? readFile(path) : QByteArray();
+        auto controlled = existed ? parseConfig(oldBytes) : YAML::Node(YAML::NodeType::Map);
+        auto tun = defaultTunConfig(); if (controlled["tun"]) tun = mergeYaml(tun, controlled["tun"]);
+        tun = mergeYaml(tun, parseConfig(QJsonDocument(patch).toJson()));
+        const bool enable = tun["enable"].as<bool>();
+        QString id = m_store.settings()["active"].toString();
+        if (id.isEmpty() && !m_store.profiles().isEmpty()) id = m_store.profiles().first().toObject()["id"].toString();
+        if (enable && id.isEmpty()) { answer({{"error", "请先导入订阅，再启用虚拟网卡"}}); return; }
+        if (enable && !hasTunPermission(m_store.settings()["core"].toString())) {
+            answer({{"error", "启用虚拟网卡需要先授权内核"}, {"needsAuthorization", true}}); return;
+        }
+        const bool running = m_core.state() == QProcess::Running;
+        if (enable) {
+            const auto device = QString::fromStdString(tun["device"].as<std::string>());
+            const bool owned = running && m_expectedTun["enable"].toBool() && m_tunDevice == device;
+            if (!owned && QNetworkInterface::interfaceFromName(device).isValid()) {
+                answer({{"error", "虚拟网卡 " + device + " 已被其他程序使用，请更换名称"}}); return;
+            }
+        }
+        controlled["tun"] = tun;
+        if (enable) controlled["dns"]["enable"] = true;
+        writeFile(path, emitYaml(controlled));
+        if (!running && !enable) { answer({{"message", "虚拟网卡设置已保存"}, {"tun", yamlToJson(tun)}}); return; }
+        auto restore = [path, existed, oldBytes] { if (existed) writeFile(path, oldBytes); else QFile::remove(path); };
+        auto complete = [this, answer, restore, running, id, enable](QJsonObject result) {
+            if (result["error"].toString().isEmpty()) {
+                result["message"] = enable ? "虚拟网卡已启用，DNS 已联动开启" : "虚拟网卡已关闭，原路由已恢复";
+                answer(result); return;
+            }
+            const auto error = result["error"].toString();
+            try {
+                restore();
+                if (running) {
+                    startCore(id, [this, answer, error](QJsonObject recovered) {
+                        const auto recoveryError = recovered["error"].toString();
+                        m_error = error + (recoveryError.isEmpty() ? QString() : "\n恢复原配置失败：" + recoveryError);
+                        recovered["error"] = m_error; answer(recovered);
+                    }, false, true, true);
+                } else { m_error = error; answer(result); }
+            } catch (const std::exception &e) { m_busy = false; m_error = error + "\n恢复配置失败：" + QString::fromUtf8(e.what()); answer({{"error", m_error}}); }
+        };
+        try { startCore(id, complete, false, true, true); }
+        catch (...) { restore(); throw; }
+    }
+    void repairTun(Answer answer)
+    {
+        if (m_busy) { answer({{"error", "内核正在操作，请稍候"}}); return; }
+        if (m_core.state() != QProcess::Running || !m_expectedTun["enable"].toBool()) { answer({{"error", "虚拟网卡未启用"}}); return; }
+        m_busy = true; m_tunError.clear(); m_error.clear();
+        reloadRuntime([answer](QJsonObject result) { if (result["error"].toString().isEmpty()) result["message"] = "虚拟网卡、路由与 DNS 配置已重新加载"; answer(result); });
+    }
+    void reloadRuntime(Answer answer)
+    {
+        m_busy = true; m_error.clear();
+        const auto settings = m_store.settings(); QUrl url(settings["endpoint"].toString()); url.setPath("/configs"); url.setQuery("force=true");
+        QNetworkRequest request(url); request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        request.setRawHeader("Authorization", "Bearer " + settings["secret"].toString().toUtf8());
+        auto *reply = m_network.put(request, QJsonDocument(QJsonObject{{"path", dataDir() + "/work/config.yaml"}}).toJson());
+        QTimer::singleShot(5000, reply, &QNetworkReply::abort);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, answer] {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) { m_busy = false; m_error = "重建虚拟网卡失败：" + reply->errorString(); answer({{"error", m_error}}); return; }
+            completeStart(answer, 0, true);
+        });
+    }
     void handle(const QJsonObject &command, Answer answer)
     {
         const auto action = command["action"].toString();
         if (action == "status") { answer(status()); return; }
+        if (action == "tun") { if (!command["options"].isObject()) throw std::runtime_error("无效的虚拟网卡配置"); configureTun(command["options"].toObject(), answer); return; }
+        if (action == "repair-tun") { repairTun(answer); return; }
         if (action == "stop") {
             if (m_busy) { answer({{"error", "A core operation is in progress"}}); return; }
             m_wanted = false; ++m_restartEpoch; stopCore(); answer(status()); return;
@@ -375,6 +517,15 @@ private:
             });
         }
     }
+private slots:
+    void prepareForSleep(bool sleeping) { if (sleeping) m_resumeTimer.stop(); else m_resumeTimer.start(); }
+private:
+    QTimer m_resumeTimer;
+    QJsonObject m_expectedTun;
+    bool m_tunEnabled = false;
+    QString m_tunDevice;
+    QString m_tunError;
+    QByteArray m_coreLogBuffer;
     Store m_store;
     QProcess m_core;
     QLocalServer m_server;
@@ -460,3 +611,5 @@ int main(int argc, char **argv)
         return app.exec();
     } catch (const std::exception &e) { QTextStream(stderr) << e.what() << '\n'; return 1; }
 }
+
+#include "service.moc"

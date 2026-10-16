@@ -8,6 +8,7 @@ Build-Depends: debhelper-compat (= 11),
  qtbase5-dev (>= 5.11),
  qtdeclarative5-dev (>= 5.11),
  dde-control-center-dev,
+ libdtkwidget-dev,
  curl,
  gzip
 Standards-Version: 4.3.0

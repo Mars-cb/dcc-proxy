@@ -100,3 +100,25 @@ python3 tests/smoke_system_proxy.py \
   --service build-$(dpkg --print-architecture)/dde-mihomo-daemon \
   --allow-system-proxy
 ```
+
+
+## 0.1.2 概览与 TUN 回归
+
+Qt 回归共 20 项。新增模拟异步返回顺序的概览测试：内核请求先返回、统计请求延迟返回，
+重复刷新时两个标签的文字、位置保持稳定，隐藏连接表不重建。原生 DSwitchButton 验证
+停止、启动、操作禁用、失败读回；绕过列表的错误项保留并精确提示。
+
+TUN 测试在全新 user/network namespace 中运行，要求宿主网络标识不同且初始只有 lo。
+它创建临时出口网卡、本地 DNS 与 HTTP 服务，临时数据目录、独立端口、关闭系统代理联动，
+不使用真实订阅或宿主 Clash。测试验证 Mixed TUN、自动路由、any:53 DNS 劫持、Fake IP
+实际 HTTP、MTU 生效、保存时保留 enable、网卡冲突拒绝、热加载与唤醒重载、关闭后恢复所有
+路由/规则并保留 DNS。使用现有 setpriv 在测试子进程中撤销 CAP_NET_ADMIN，验证真实
+EPERM 创建错误及恢复可用内核；不改变宿主内核文件权限。
+
+```sh
+unshare --user --map-root-user --net python3 tests/smoke_tun.py \
+  --host-netns "$(readlink /proc/self/ns/net)" \
+  --service build/dde-mihomo-daemon --core cores/amd64/mihomo
+```
+
+本轮只在本机安装和测试，不同步远端机器；未安装新的依赖。

@@ -1,4 +1,8 @@
 #include "config.h"
+#include "tun.h"
+#include <DSwitchButton>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include "api.h"
 #include "panel.h"
 #include "nodeflags.h"
@@ -46,6 +50,90 @@ public:
 class PartyTests : public QObject {
     Q_OBJECT
 private slots:
+    void clashTunDefaultsAndRuntime()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("TUN fixture", {}, "mixed-port: 17890\ntun: {enable: true, stack: system}\ndns: {enable: false}\nrules: [\"MATCH,DIRECT\"]\n");
+        auto config = parseConfig(store.runtime(id));
+        QVERIFY(!config["tun"]["enable"].as<bool>());
+        QCOMPARE(config["tun"]["stack"].as<std::string>(), std::string("mixed"));
+        QCOMPARE(config["tun"]["device"].as<std::string>(), std::string("Mihomo"));
+        QVERIFY(config["tun"]["dns-hijack"].size() == 0);
+        writeFile(dir.path() + "/controlled.yaml", "tun: {enable: true, mtu: 1400}\n");
+        config = parseConfig(store.runtime(id));
+        QVERIFY(config["tun"]["enable"].as<bool>());
+        QVERIFY(config["dns"]["enable"].as<bool>());
+        QCOMPARE(config["tun"]["mtu"].as<int>(), 1400);
+        QVERIFY(config["tun"]["auto-route"].as<bool>());
+        QVERIFY(config["tun"]["auto-detect-interface"].as<bool>());
+        QVERIFY(!config["tun"]["auto-redirect"].as<bool>());
+        QCOMPARE(config["tun"]["dns-hijack"][0].as<std::string>(), std::string("any:53"));
+        QCOMPARE(config["dns"]["proxy-server-nameserver"][0].as<std::string>(), std::string("system"));
+        for (const auto &options : QList<QJsonObject>{{{"mtu", 0}}, {{"mtu", 65536}}, {{"mtu", 1.5}}, {{"mtu", 1e30}}, {{"device", "bad/name"}}, {{"stack", "unknown"}}, {{"route-exclude-address", QJsonArray{"example.com"}}}, {{"enable", "true"}}})
+            QVERIFY_EXCEPTION_THROWN(validateTunOptions(options), std::runtime_error);
+        const auto validated = validateTunOptions({{"route-exclude-address", QJsonArray{"192.168.7.9/16", "fc00::/7"}}});
+        QCOMPARE(validated["route-exclude-address"].toArray().first().toString(), QString("192.168.0.0/16"));
+        QVERIFY(!validated.contains("enable"));
+    }
+    void overviewStableAndNativeSwitch()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        QTcpServer http; QVERIFY(http.listen(QHostAddress::LocalHost));
+        QLocalServer ipc; QVERIFY(ipc.listen(dir.path() + "/service.sock"));
+        bool running = true, failStart = false; int starts = 0, stops = 0;
+        connect(&ipc, &QLocalServer::newConnection, this, [&] {
+            while (auto *socket = ipc.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QLocalSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); if (!buffer->contains('\n')) return;
+                    const auto action = QJsonDocument::fromJson(*buffer).object()["action"].toString();
+                    QJsonObject state;
+                    if (action == "start") { ++starts; if (failStart) state["error"] = "fixture start failed"; else running = true; }
+                    if (action == "stop") { ++stops; running = false; }
+                    state["running"] = running; state["tun"] = QJsonObject{{"enable", false}};
+                    QTimer::singleShot(action == "status" ? 0 : 100, socket, [socket, state] { socket->write(QJsonDocument(state).toJson(QJsonDocument::Compact) + '\n'); socket->flush(); socket->disconnectFromServer(); });
+                });
+            }
+        });
+        int connections = 0;
+        connect(&http, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = http.nextPendingConnection()) {
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket] {
+                    const auto request = socket->readAll(); QByteArray body = "{}"; int delay = 0;
+                    if (request.startsWith("GET /configs ")) body = "{\"mode\":\"rule\",\"mixed-port\":17890}";
+                    if (request.startsWith("GET /connections ")) { ++connections; delay = 160; body = "{\"connections\":[{\"id\":\"fixture\"}],\"uploadTotal\":1024,\"downloadTotal\":2048,\"memory\":4096}"; }
+                    QTimer::singleShot(delay, socket, [socket, body] { socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost(); });
+                });
+            }
+        });
+        Store store; auto settings = store.settings(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(http.serverPort()); store.setSettings(settings);
+        {
+            Panel panel; panel.resize(900, 700); panel.show();
+            auto *control = panel.findChild<Dtk::Widget::DSwitchButton *>("core-switch"); QVERIFY(control);
+            auto *core = panel.findChild<QLabel *>("overview-core"); auto *stats = panel.findChild<QLabel *>("overview-statistics"); QVERIFY(core); QVERIFY(stats);
+            QTRY_VERIFY(core->text().contains("17890")); QTRY_VERIFY(stats->text().contains("连接 1")); QTRY_VERIFY(control->isChecked());
+            const auto coreText = core->text(); const auto statsText = stats->text(); const auto statsPosition = stats->pos();
+            auto *refresh = panel.findChild<QPushButton *>("refresh-proxy-panel"); QVERIFY(refresh);
+            for (int i = 0; i < 3; ++i) {
+                QTest::mouseClick(refresh, Qt::LeftButton); QTest::qWait(40);
+                QCOMPARE(core->text(), coreText); QCOMPARE(stats->text(), statsText); QCOMPARE(stats->pos(), statsPosition);
+                QTest::qWait(180); QCOMPARE(core->text(), coreText); QCOMPARE(stats->text(), statsText); QCOMPARE(stats->pos(), statsPosition);
+            }
+            QVERIFY(connections >= 4); QCOMPARE(panel.findChildren<QTableWidget *>().at(1)->rowCount(), 0);
+            QTest::mouseClick(control, Qt::LeftButton); QVERIFY(!control->isEnabled()); QTRY_COMPARE(stops, 1); QTRY_VERIFY(control->isEnabled()); QVERIFY(!control->isChecked());
+            failStart = true; QTest::mouseClick(control, Qt::LeftButton); QTRY_COMPARE(starts, 1); QTRY_VERIFY(control->isEnabled()); QVERIFY(!control->isChecked());
+            QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("fixture start failed"));
+            failStart = false; QTest::mouseClick(control, Qt::LeftButton); QTRY_COMPARE(starts, 2); QTRY_VERIFY(control->isEnabled()); QVERIFY(control->isChecked());
+            auto *bypass = panel.findChild<QPlainTextEdit *>("proxy-bypass"); auto *save = panel.findChild<QPushButton *>("save-proxy-bypass"); QVERIFY(bypass); QVERIFY(save);
+            const auto userInput = QString("ai.uniontech.com\nai.getdeepin.org\n*.uniontech.*\ndify.cicd.getdeepin.org\nagent-dev.uniontech.com\ndocs.qq.com");
+            bypass->setPlainText(userInput); QVERIFY(!save->isEnabled()); QCOMPARE(bypass->toPlainText(), userInput);
+            QVERIFY(panel.findChild<QLabel *>("proxy-bypass-error")->text().contains("*.uniontech.*"));
+            bypass->setPlainText(QString(userInput).replace("*.uniontech.*", "*.uniontech.com")); QVERIFY(save->isEnabled());
+            panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void bypassValidation()
     {
         QCOMPARE(normalizeProxyBypass({" LOCALHOST ", "localhost", ".Example.COM", "*.example.com", "[::1]", "192.168.7.9/16", ""}),
@@ -144,7 +232,7 @@ private slots:
     void profileRoundTrip()
     {
         QTemporaryDir dir; Store store(dir.path());
-        const auto id = store.saveProfile("日本", "https://example.com/sub", "mixed-port: 17890\nproxies: []\nrules: [MATCH,DIRECT]\n");
+        const auto id = store.saveProfile("日本", "https://example.com/sub", "mixed-port: 17890\nproxies: []\nrules: [\"MATCH,DIRECT\"]\n");
         QVERIFY(validId(id)); QCOMPARE(store.profiles().size(), 1);
         QVERIFY(store.profile(id).contains("17890"));
         store.saveProfile("新名称", {}, "mode: direct\n", id);

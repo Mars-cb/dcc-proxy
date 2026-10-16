@@ -1,4 +1,5 @@
 #include "config.h"
+#include "tun.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QSet>
@@ -346,6 +347,17 @@ QByteArray Store::runtime(const QString &id) const
         if (!process.waitForFinished(4000)) { process.kill(); process.waitForFinished(); fail("Override script exceeded time limit"); }
         if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) fail(QString::fromUtf8(process.readAllStandardError()));
         node = parseConfig(process.readAllStandardOutput());
+    }
+    // Clash Party applies the controlled TUN defaults after subscription overrides.
+    auto controlled = QFile::exists(m_root + "/controlled.yaml") ? parseConfig(readFile(m_root + "/controlled.yaml")) : YAML::Node(YAML::NodeType::Map);
+    auto tun = defaultTunConfig();
+    if (controlled["tun"]) tun = mergeYaml(tun, controlled["tun"]);
+    node["tun"] = node["tun"] ? mergeYaml(node["tun"], tun) : tun;
+    if (node["tun"]["enable"].as<bool>()) {
+        node["dns"] = node["dns"] ? mergeYaml(defaultTunDns(), node["dns"]) : defaultTunDns();
+        node["dns"]["enable"] = true;
+    } else if (!node["dns"] || !node["dns"]["enable"] || !node["dns"]["enable"].as<bool>()) {
+        node["tun"]["dns-hijack"] = YAML::Node(YAML::NodeType::Sequence);
     }
     // Bootstrap node hostnames independently from subscription DNS, which may
     // require an already working proxy or DNS servers blocked by this network.

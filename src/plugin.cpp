@@ -14,7 +14,7 @@ QIcon ProxyPlugin::icon() const
 }
 QStringList ProxyPlugin::availPage() const
 {
-    return {"Overview", "Proxies", "Profiles", "Connections", "Rules", "Providers", "Logs", "Overrides", "Tools", "Settings"};
+    return {"Overview", "Proxies", "Profiles", "Connections", "Rules", "Providers", "Logs", "Overrides", "Tools", "Settings", "Tun"};
 }
 QWidget *ProxyPlugin::moduleWidget() { return m_panel; }
 void ProxyPlugin::active()
@@ -43,11 +43,12 @@ void ProxyPlugin::addChildPageTrans() const
     m_frameProxy->addChildPageTrans("Overrides", tr("覆写"));
     m_frameProxy->addChildPageTrans("Tools", tr("工具"));
     m_frameProxy->addChildPageTrans("Settings", tr("设置"));
+    m_frameProxy->addChildPageTrans("Tun", tr("虚拟网卡"));
 }
 void ProxyPlugin::initSearchData()
 {
     if (!m_frameProxy) return;
-    for (const auto &page : {tr("概览"), tr("节点"), tr("订阅"), tr("连接"), tr("规则"), tr("资源"), tr("日志"), tr("覆写"), tr("工具"), tr("设置")})
+    for (const auto &page : {tr("概览"), tr("节点"), tr("订阅"), tr("连接"), tr("规则"), tr("资源"), tr("日志"), tr("覆写"), tr("工具"), tr("设置"), tr("虚拟网卡")})
         m_frameProxy->setWidgetVisible(displayName(), page, true);
     m_frameProxy->updateSearchData(displayName());
 }
