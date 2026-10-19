@@ -9,8 +9,36 @@
 #include <memory>
 #include <QUrlQuery>
 #include <QRegularExpression>
+#include <QProcess>
+#include <stdexcept>
 
 namespace Party {
+void validateAndCommit(const QString &root, const QJsonObject &change, QObject *context, Api::Done done, bool commitChanges)
+{
+    auto *process = new QProcess(context);
+    auto completed = QSharedPointer<bool>::create(false);
+    const auto initial = configFingerprint(root);
+    auto finish = [root, change, process, completed, initial, done, commitChanges](bool success) mutable {
+        if (*completed) return;
+        *completed = true;
+        const auto result = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
+        const auto detail = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        process->deleteLater();
+        try {
+            if (!success || !result["valid"].toBool()) throw std::runtime_error((detail.isEmpty() ? QString("配置校验失败，原配置已保留") : detail).toStdString());
+            if (result["fingerprint"].toString().toLatin1() != initial) throw std::runtime_error("校验期间配置发生变化，请重新保存");
+            auto commit = change; commit["fingerprint"] = result["fingerprint"];
+            if (commitChanges) commitStoreChange(root, commit);
+            done(result, {});
+        } catch (const std::exception &e) { done({}, QString::fromUtf8(e.what())); }
+    };
+    QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), context,
+                     [finish](int code, QProcess::ExitStatus status) mutable { finish(code == 0 && status == QProcess::NormalExit); });
+    QObject::connect(process, &QProcess::errorOccurred, context, [finish](QProcess::ProcessError error) mutable { if (error == QProcess::FailedToStart) finish(false); });
+    QTimer::singleShot(125000, process, [process] { if (process->state() != QProcess::NotRunning) process->kill(); });
+    process->start(serviceExecutable(), {"--validate-store", root});
+    process->write(QJsonDocument(change).toJson(QJsonDocument::Compact)); process->closeWriteChannel();
+}
 Api::Api(QObject *parent) : QObject(parent)
 {
     m_network.setProxy(QNetworkProxy::NoProxy);
@@ -58,6 +86,7 @@ QNetworkRequest Api::makeRequest(const QString &path) const
 }
 void Api::request(const QByteArray &method, const QString &path, const QJsonObject &body, Done done, int timeoutMs)
 {
+    if (m_callbackWrapper) done = m_callbackWrapper(std::move(done));
     auto *reply = m_network.sendCustomRequest(makeRequest(path), method,
         body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact));
     m_pending.insert(reply);
@@ -154,7 +183,8 @@ void serviceRequest(const QJsonObject &command, QObject *context, Api::Done done
         finish(doc.object(), doc.object()["error"].toString());
     });
     const auto action = command["action"].toString();
-    timer->start(action == "start" || action == "restart" || action == "tun" || action == "ports" ? 140000 : 20000);
+    timer->start(action == "start" || action == "restart" || action == "tun" || action == "ports" ||
+                 action == "apply" || action == "recover-orphan" ? 140000 : 20000);
     socket->connectToServer(socketName());
 }
 void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPort, QObject *context, SubscriptionDone done)

@@ -1,3 +1,29 @@
+dcc-proxy (0.1.11) unstable; urgency=medium
+
+  * Restart both the daemon and Mihomo from the overview service restart button.
+  * Validate before shutdown, retain proxy mode and recover the previous runtime.
+  * Support systemd and manual startup, including an older running daemon.
+  * Replace horizontal tabs with native control-center secondary navigation.
+  * Remove menu tooltips and bundle settings, subscription and TUN icons.
+  * Keep provider rows stable during polling and scope notifications per page.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Mon, 19 Oct 2026 14:00:00 +0800
+
+dcc-proxy (0.1.10) unstable; urgency=medium
+
+  * Validate complete staged configurations before saving and preserve rollback data.
+  * Recover the last working runtime after startup failures and bounded crashes.
+  * Preserve running cores and manual/PAC/off state across subscription updates.
+  * Persist scoped rules and ordered YAML/JavaScript overrides independently.
+  * Restore exact managed backup contents and verify orphan process identities.
+  * Separate remote API controls from local core and desktop proxy management.
+  * Add read-only diagnostics, structured settings and existing Sub-Store management.
+  * Import VMess, SSR, legacy SS and mapped WS/gRPC/H2/HTTP transports.
+  * Allow parallel node-test clicks with independent request options and results.
+  * Display frontend/backend versions without restarting an active proxy on upgrade.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Mon, 19 Oct 2026 13:30:00 +0800
+
 dcc-proxy (0.1.9) unstable; urgency=medium
 
   * Import AnyTLS share links from plain and Base64 URI subscriptions.

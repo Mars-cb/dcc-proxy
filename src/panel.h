@@ -7,6 +7,8 @@
 #include <QElapsedTimer>
 #include <QQueue>
 #include <QDateTime>
+#include <QMap>
+#include <utility>
 class QLabel;
 class QComboBox;
 class QLineEdit;
@@ -28,7 +30,10 @@ class Panel : public QWidget {
 public:
     explicit Panel(QWidget *parent = nullptr);
     void openPage(const QString &page);
+    void setExternalNavigation(bool enabled);
     QSize minimumSizeHint() const override { return QSize(460, 420); }
+signals:
+    void pageChanged(int index);
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
@@ -50,7 +55,17 @@ private:
     QString websiteRulePolicy() const;
     void updateWebsiteRule();
     void addWebsiteRule();
+    void saveChange(const QJsonObject &change, std::function<void()> after = {});
+    void saveProfileCandidate(const QString &name, const QString &url, const QByteArray &bytes, const QString &id = {}, const QJsonObject &metadata = {});
+    void applySavedProfile(const QString &id);
+    void editCustomRules();
+    void editManagedOverrides();
+    void editSectionForm(const QString &section);
+    void diagnose();
+    void subStore();
+    void restoreArchive(const QByteArray &bytes);
     QWidget *providersPage();
+    void updateProviders(const QString &kind, const QJsonObject &providers);
     QWidget *overridePage();
     QWidget *settingsPage();
     QWidget *toolsPage();
@@ -86,13 +101,35 @@ private:
     void systemProxy(const QString &mode);
     void webdav(bool upload);
     void message(const QString &text, bool error = false);
+    void showMessage(const QString &text, bool error);
+    int notificationPage() const;
+    Api::Done scopedReply(Api::Done done);
+    template<typename... Args> std::function<void(Args...)> scopedCallback(std::function<void(Args...)> done, int page = -1)
+    {
+        if (page < 0) page = notificationPage();
+        const QPointer<Panel> guard(this);
+        return [guard, page, done](Args... args) {
+            if (!guard) return;
+            const int previous = guard->m_notificationContext; guard->m_notificationContext = page;
+            try { done(std::forward<Args>(args)...); }
+            catch (...) { if (guard) guard->m_notificationContext = previous; throw; }
+            if (guard) guard->m_notificationContext = previous;
+        };
+    }
+    void requestService(const QJsonObject &command, QObject *context, Api::Done done);
+    void resetPageStatus();
     void guarded(std::function<void()> action);
     Api m_api;
     Store m_store;
     QNetworkAccessManager m_download;
     QTimer m_refreshTimer;
-    QTabWidget *m_tabs;
+    QTabWidget *m_tabs = nullptr;
+    QLabel *m_pageTitle;
+    bool m_externalNavigation = false;
+    int m_notificationContext = -1;
+    QMap<int, QPair<QString, bool>> m_pageMessages;
     QLabel *m_status;
+    QLabel *m_backendVersion = nullptr;
     MessageArea *m_messageArea;
     QLabel *m_overview;
     QLabel *m_traffic;
@@ -100,6 +137,8 @@ private:
     QAbstractButton *m_coreSwitch;
     QPushButton *m_restart;
     bool m_coreBusy = false;
+    bool m_configBusy = false;
+    QJsonObject m_serviceState;
     bool m_tunBusy = false;
     QAbstractButton *m_tunPageSwitch;
     QLabel *m_tunStatus;
@@ -173,7 +212,9 @@ private:
     bool m_selecting = false;
     QSet<QString> m_reads;
     QSet<QString> m_testing;
-    QQueue<QString> m_testQueue;
+    struct NodeTest { QString name; QString query; QString provider; int timeout; };
+    QQueue<NodeTest> m_testQueue;
+    QSet<int> m_testPages;
     QMap<QString, QPair<QDateTime, int>> m_testResults;
     QMap<QString, QString> m_testErrors;
     QString m_testQuery;

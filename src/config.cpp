@@ -1,5 +1,7 @@
 #include "config.h"
 #include "tun.h"
+#include "subscriptionnodes.h"
+#include <QTemporaryDir>
 #include <QCoreApplication>
 #include <QDir>
 #include <QSet>
@@ -96,10 +98,35 @@ YAML::Node parseConfig(const QByteArray &data)
     inspect(docs.front(), 0, budget);
     return docs.front();
 }
+static QByteArray wrapSubscriptionNodes(const YAML::Node &proxies)
+{
+    YAML::Node names(YAML::NodeType::Sequence);
+    for (const auto &proxy : proxies) {
+        if (!proxy["name"] || !proxy["name"].IsScalar()) fail("Subscription node is missing a name");
+        names.push_back(proxy["name"].as<std::string>());
+    }
+    YAML::Node config;
+    config["mixed-port"] = 16666; config["mode"] = "rule"; config["log-level"] = "info"; config["allow-lan"] = false;
+    config["proxies"] = proxies;
+    YAML::Node automatic;
+    automatic["name"] = "自动选择"; automatic["type"] = "url-test"; automatic["url"] = "https://www.gstatic.com/generate_204"; automatic["interval"] = 300; automatic["proxies"] = names;
+    YAML::Node selector;
+    selector["name"] = "节点选择"; selector["type"] = "select"; selector["proxies"].push_back("自动选择");
+    for (const auto &n : names) selector["proxies"].push_back(n.as<std::string>());
+    selector["proxies"].push_back("DIRECT");
+    config["proxy-groups"].push_back(selector); config["proxy-groups"].push_back(automatic);
+    config["rules"].push_back("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve");
+    config["rules"].push_back("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve");
+    config["rules"].push_back("IP-CIDR,172.16.0.0/12,DIRECT,no-resolve");
+    config["rules"].push_back("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
+    config["rules"].push_back("MATCH,节点选择");
+    validateConfig(config);
+    return emitYaml(config);
+}
 QByteArray normalizeSubscription(const QByteArray &data)
 {
     if (data.size() > 8 * 1024 * 1024) fail("Subscription exceeds 8 MiB");
-    try { auto node = parseConfig(data); validateConfig(node); return data; }
+    try { auto node = parseConfig(data); validateConfig(node); if (node.size() == 1 && node["proxies"] && node["proxies"].IsSequence()) return wrapSubscriptionNodes(node["proxies"]); return data; }
     catch (const YAML::Exception &) { }
     catch (const std::runtime_error &) { }
     auto text = QString::fromUtf8(data).trimmed();
@@ -113,6 +140,14 @@ QByteArray normalizeSubscription(const QByteArray &data)
     QSet<QString> usedNames;
     for (const auto &line : text.split(QRegularExpression("[\r\n]+"), QString::SkipEmptyParts)) {
         if (line.startsWith('#')) continue;
+        auto extended = extendedSubscriptionNode(line.trimmed());
+        if (extended.IsMap()) {
+            auto name = QString::fromStdString(extended["name"].as<std::string>());
+            const auto base = name; int index = 2;
+            while (usedNames.contains(name)) name = base + " (" + QString::number(index++) + ')';
+            extended["name"] = name.toStdString(); usedNames.insert(name);
+            proxies.push_back(extended); names.push_back(name.toStdString()); continue;
+        }
         QUrl url(line.trimmed());
         const QUrlQuery query(url);
         auto q = [&](const QString &key) { return query.queryItemValue(key, QUrl::FullyDecoded); };
@@ -125,7 +160,7 @@ QByteArray normalizeSubscription(const QByteArray &data)
         p["name"] = name.toStdString();
         p["server"] = url.host().toStdString();
         p["port"] = url.port(443);
-        if (url.host().isEmpty()) fail("Invalid node URI (missing server)");
+        if (!url.isValid() || url.host().isEmpty() || url.port(443) < 1 || url.port(443) > 65535) fail("Invalid node URI (server or port)");
         if (scheme == "hysteria2" || scheme == "hy2") {
             p["type"] = "hysteria2";
             auto password = url.userName(QUrl::FullyDecoded);
@@ -150,13 +185,8 @@ QByteArray normalizeSubscription(const QByteArray &data)
             if (!q("flow").isEmpty()) p["flow"] = q("flow").toStdString();
             if (q("security") == "reality") { p["reality-opts"]["public-key"] = q("pbk").toStdString(); p["reality-opts"]["short-id"] = q("sid").toStdString(); }
             if (!q("fp").isEmpty()) p["client-fingerprint"] = q("fp").toStdString();
-            const auto transport = q("type");
-            if (!transport.isEmpty() && transport != "tcp") {
-                if (transport != "ws" && transport != "grpc" && transport != "http" && transport != "h2") fail("Unsupported node transport: " + transport);
-                p["network"] = transport.toStdString();
-                if (transport == "ws") { p["ws-opts"]["path"] = q("path").toStdString(); if (!q("host").isEmpty()) p["ws-opts"]["headers"]["Host"] = q("host").toStdString(); }
-                if (transport == "grpc") p["grpc-opts"]["grpc-service-name"] = q("serviceName").toStdString();
-            }
+            const auto transport = q("type").isEmpty() ? q("network") : q("type");
+            applyUriTransport(p, transport, q("host"), q("path"), q("serviceName"));
         } else if (scheme == "ss") {
             p["type"] = "ss";
             QString method = url.userName(QUrl::FullyDecoded), password = url.password(QUrl::FullyDecoded);
@@ -167,7 +197,17 @@ QByteArray normalizeSubscription(const QByteArray &data)
                 method = decoded.left(colon); password = decoded.mid(colon + 1);
             }
             p["cipher"] = method.toStdString(); p["password"] = password.toStdString(); p["udp"] = true;
-            if (!q("plugin").isEmpty()) fail("Shadowsocks plugins require a Clash YAML subscription");
+            if (!q("plugin").isEmpty()) {
+                const auto options = q("plugin").split(';'); const auto plugin = options.value(0);
+                if (plugin != "obfs-local" && plugin != "simple-obfs" && plugin != "v2ray-plugin") fail("不支持该 Shadowsocks 插件，请提供 Mihomo YAML");
+                p["plugin"] = plugin == "v2ray-plugin" ? "v2ray-plugin" : "obfs";
+                for (int i = 1; i < options.size(); ++i) {
+                    const int equal = options[i].indexOf('='); const auto key = equal < 0 ? options[i] : options[i].left(equal); const auto value = equal < 0 ? QString() : options[i].mid(equal + 1);
+                    const auto mapped = key == "obfs" ? QString("mode") : (key == "obfs-host" ? QString("host") : key);
+                    if (equal < 0) p["plugin-opts"][mapped.toStdString()] = true;
+                    else p["plugin-opts"][mapped.toStdString()] = value.toStdString();
+                }
+            }
         } else if (scheme == "tuic") {
             p["type"] = "tuic"; p["uuid"] = url.userName(QUrl::FullyDecoded).toStdString(); p["password"] = url.password(QUrl::FullyDecoded).toStdString();
             if (!q("congestion_control").isEmpty()) p["congestion-controller"] = q("congestion_control").toStdString();
@@ -176,27 +216,11 @@ QByteArray normalizeSubscription(const QByteArray &data)
         const auto sni = !q("sni").isEmpty() ? q("sni") : q("peer");
         if (!sni.isEmpty()) p[scheme == "vless" ? "servername" : "sni"] = sni.toStdString();
         if (!q("alpn").isEmpty()) for (const auto &v : q("alpn").split(',', QString::SkipEmptyParts)) p["alpn"].push_back(v.toStdString());
-        if (q("insecure") == "1" || q("allowInsecure") == "1") p["skip-cert-verify"] = true;
+        if (q("insecure") == "1" || q("insecure") == "true" || q("allowInsecure") == "1" || q("allowInsecure") == "true") p["skip-cert-verify"] = true;
         proxies.push_back(p); names.push_back(name.toStdString());
     }
     if (proxies.size() == 0) fail("Subscription contains no supported nodes");
-    YAML::Node config;
-    config["mixed-port"] = 16666; config["mode"] = "rule"; config["log-level"] = "info"; config["allow-lan"] = false;
-    config["proxies"] = proxies;
-    YAML::Node automatic;
-    automatic["name"] = "自动选择"; automatic["type"] = "url-test"; automatic["url"] = "https://www.gstatic.com/generate_204"; automatic["interval"] = 300; automatic["proxies"] = names;
-    YAML::Node selector;
-    selector["name"] = "节点选择"; selector["type"] = "select"; selector["proxies"].push_back("自动选择");
-    for (const auto &n : names) selector["proxies"].push_back(n.as<std::string>());
-    selector["proxies"].push_back("DIRECT");
-    config["proxy-groups"].push_back(selector); config["proxy-groups"].push_back(automatic);
-    config["rules"].push_back("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve");
-    config["rules"].push_back("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve");
-    config["rules"].push_back("IP-CIDR,172.16.0.0/12,DIRECT,no-resolve");
-    config["rules"].push_back("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
-    config["rules"].push_back("MATCH,节点选择");
-    validateConfig(config);
-    return emitYaml(config);
+    return wrapSubscriptionNodes(proxies);
 }
 void validateConfig(const YAML::Node &node)
 {
@@ -350,10 +374,21 @@ QJsonObject validateProxyPorts(const QJsonObject &ports)
     }
     return ports;
 }
+static YAML::Node applyScript(YAML::Node node, const QString &scriptPath, const QString &profileName)
+{
+    QProcess process;
+    process.start(serviceExecutable(), {"--eval", scriptPath, profileName});
+    if (!process.waitForStarted(1000)) fail("Cannot start override evaluator");
+    process.write(QJsonDocument(yamlToJson(node).toObject()).toJson(QJsonDocument::Compact));
+    process.closeWriteChannel();
+    if (!process.waitForFinished(4000)) { process.kill(); process.waitForFinished(); fail("Override script exceeded time limit"); }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) fail(QString::fromUtf8(process.readAllStandardError()));
+    return parseConfig(process.readAllStandardOutput());
+}
 QByteArray Store::runtime(const QString &id) const
 {
     auto node = parseConfig(profile(id));
-    const auto s = settings();
+    const auto s = managedSettings();
     // Full YAML subscriptions can omit application listener settings.
     if (!node["mixed-port"]) node["mixed-port"] = 16666;
     // Base geodata is supplied offline; updates remain an explicit user action.
@@ -366,21 +401,24 @@ QByteArray Store::runtime(const QString &id) const
         node = mergeYaml(node, parseConfig(readFile(m_root + "/controlled.yaml")));
     if (s.value("overrideEnabled").toBool(true) && QFile::exists(m_root + "/override.yaml"))
         node = mergeYaml(node, parseConfig(readFile(m_root + "/override.yaml")));
-    if (s.value("scriptEnabled").toBool(false) && QFile::exists(m_root + "/override.js")) {
-        QProcess process;
-        QString profileName;
-        for (const auto &entry : profiles()) {
-            const auto record = entry.toObject();
-            if (record["id"].toString() == id) { profileName = record["name"].toString(); break; }
+    QString profileName;
+    for (const auto &entry : profiles()) if (entry.toObject()["id"].toString() == id) profileName = entry.toObject()["name"].toString();
+    if (s.value("scriptEnabled").toBool(false) && QFile::exists(m_root + "/override.js"))
+        node = applyScript(node, m_root + "/override.js", profileName);
+    const auto custom = customizations(); checkCustomizations(custom);
+    for (const auto &entry : custom["overrides"].toArray()) {
+        const auto item = entry.toObject();
+        if (!item.value("enabled").toBool(true) || (!item["profile"].toString().isEmpty() && item["profile"].toString() != id)) continue;
+        if (item["kind"].toString() == "yaml") node = mergeYaml(node, parseConfig(item["content"].toString().toUtf8()));
+        else {
+            QTemporaryDir script; if (!script.isValid()) fail("Cannot create override evaluator directory");
+            const auto path = script.path() + "/override.js"; writeFile(path, item["content"].toString().toUtf8());
+            node = applyScript(node, path, profileName);
         }
-        process.start(serviceExecutable(), {"--eval", m_root + "/override.js", profileName});
-        if (!process.waitForStarted(1000)) fail("Cannot start override evaluator");
-        process.write(QJsonDocument(yamlToJson(node).toObject()).toJson(QJsonDocument::Compact));
-        process.closeWriteChannel();
-        if (!process.waitForFinished(4000)) { process.kill(); process.waitForFinished(); fail("Override script exceeded time limit"); }
-        if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) fail(QString::fromUtf8(process.readAllStandardError()));
-        node = parseConfig(process.readAllStandardOutput());
     }
+    const auto customRules = custom["rules"].toObject()[id].toArray();
+    for (int i = customRules.size() - 1; i >= 0; --i)
+        node = parseConfig(prependWebsiteRule(emitYaml(node), customRules[i].toString()));
     // Clash Party applies the controlled TUN defaults after subscription overrides.
     auto controlled = QFile::exists(m_root + "/controlled.yaml") ? parseConfig(readFile(m_root + "/controlled.yaml")) : YAML::Node(YAML::NodeType::Map);
     // Explicit listener controls have the same final precedence as TUN controls.
@@ -418,7 +456,7 @@ QByteArray Store::runtime(const QString &id) const
 QByteArray backup(const QString &root)
 {
     QJsonObject files;
-    for (const auto &name : {"settings.json", "profiles.json", "override.yaml", "override.js", "controlled.yaml"})
+    for (const auto &name : {"settings.json", "profiles.json", "override.yaml", "override.js", "controlled.yaml", "customizations.json"})
         if (QFile::exists(root + '/' + name)) files[name] = QString::fromLatin1(readFile(root + '/' + name).toBase64());
     QDir dir(root + "/profiles");
     for (const auto &name : dir.entryList({"*.yaml"}, QDir::Files))
@@ -435,16 +473,28 @@ void restore(const QString &root, const QByteArray &bytes)
     QMap<QString, QByteArray> decoded;
     for (auto it = files.begin(); it != files.end(); ++it) {
         const QString name = it.key();
-        if (name != "settings.json" && name != "profiles.json" && name != "override.yaml" && name != "override.js" && name != "controlled.yaml" &&
+        if (name != "settings.json" && name != "profiles.json" && name != "override.yaml" && name != "override.js" && name != "controlled.yaml" && name != "customizations.json" &&
             !(name.startsWith("profiles/") && name.endsWith(".yaml") && validId(name.mid(9, name.size() - 14)))) fail("Invalid backup path");
         const auto data = QByteArray::fromBase64(it.value().toString().toLatin1());
         if (name.endsWith(".yaml")) validateConfig(parseConfig(data));
         if (name.endsWith(".json") && !QJsonDocument::fromJson(data).isObject()) fail("Invalid backup JSON");
         decoded[name] = data;
     }
-    // Validate every entry before changing local data. Keep a rollback archive.
+    if (decoded.contains("customizations.json")) checkCustomizations(QJsonDocument::fromJson(decoded["customizations.json"]).object());
+    // Restore the exact managed snapshot, including removal of stale overrides.
+    QMap<QString, QByteArray> before;
+    for (const auto &name : managedConfigFiles(root))
+        if (QFile::exists(root + '/' + name)) before[name] = readFile(root + '/' + name);
     writeFile(root + "/before-restore.json", backup(root));
-    for (auto it = decoded.begin(); it != decoded.end(); ++it) writeFile(root + '/' + it.key(), it.value());
+    try {
+        for (auto it = decoded.begin(); it != decoded.end(); ++it) writeFile(root + '/' + it.key(), it.value());
+        for (auto it = before.begin(); it != before.end(); ++it)
+            if (!decoded.contains(it.key()) && !QFile::remove(root + '/' + it.key())) fail("Cannot remove stale configuration: " + it.key());
+    } catch (...) {
+        for (auto it = before.begin(); it != before.end(); ++it) writeFile(root + '/' + it.key(), it.value());
+        for (auto it = decoded.begin(); it != decoded.end(); ++it) if (!before.contains(it.key())) QFile::remove(root + '/' + it.key());
+        throw;
+    }
 }
 static QByteArray gsettings(const QStringList &args)
 {
@@ -454,7 +504,7 @@ static QByteArray gsettings(const QStringList &args)
         fail(QString::fromUtf8(p.readAllStandardError()).trimmed());
     return p.readAllStandardOutput().trimmed();
 }
-void restoreSystemProxy()
+void restoreSystemProxy(bool force)
 {
     const QString path = dataDir() + "/system-proxy-before.json";
     if (!QFile::exists(path)) return;
@@ -463,6 +513,19 @@ void restoreSystemProxy()
         QDBusInterface network(snapshot["service"].toString(), snapshot["path"].toString(), snapshot["interface"].toString(), QDBusConnection::sessionBus());
         network.setTimeout(2000);
         if (!network.isValid()) fail(network.lastError().message());
+        if (!force && snapshot["applied"].isObject()) {
+            auto get = [&](const QString &method, const QVariantList &args = QVariantList()) {
+                const auto reply = network.callWithArgumentList(QDBus::Block, method, args);
+                if (reply.type() == QDBusMessage::ErrorMessage) fail(reply.errorMessage());
+                return QJsonArray::fromVariantList(reply.arguments());
+            };
+            QJsonObject current{{"mode", get("GetProxyMethod")}, {"pac", get("GetAutoProxy")}, {"bypass", get("GetProxyIgnoreHosts")}};
+            for (const auto &kind : {"http", "https", "socks", "ftp"}) current[kind] = get("GetProxy", {QString(kind)});
+            if (current != snapshot["applied"].toObject()) {
+                if (!QFile::remove(path)) fail("Cannot remove stale proxy snapshot");
+                return; // Another application/user changed the proxy; preserve that state.
+            }
+        }
         for (const auto &v : snapshot["commands"].toArray()) {
             const auto c = v.toObject();
             const auto reply = network.callWithArgumentList(QDBus::Block, c["method"].toString(), c["args"].toArray().toVariantList());
@@ -472,6 +535,15 @@ void restoreSystemProxy()
         return;
     }
     const auto values = snapshot["values"].toArray();
+    if (!force && snapshot["appliedValues"].isArray()) {
+        for (const auto &entry : snapshot["appliedValues"].toArray()) {
+            const auto item = entry.toObject();
+            if (QString::fromUtf8(gsettings({"get", item["schema"].toString(), item["key"].toString()})) != item["value"].toString()) {
+                if (!QFile::remove(path)) fail("Cannot remove stale proxy snapshot");
+                return;
+            }
+        }
+    }
     // Set protocol hosts and ports before returning to the previous mode.
     for (const auto &v : values) {
         const auto e = v.toObject();
@@ -527,7 +599,11 @@ void setSystemProxy(const QString &mode, int port, const QString &pacUrl, const 
             if (mode == "manual") for (const auto &kind : {"http", "https", "socks", "ftp"}) call("SetProxy", {QString(kind), QString("127.0.0.1"), QString::number(port)});
             if (mode == "auto") call("SetAutoProxy", {pacUrl});
             call("SetProxyMethod", {mode});
-        } catch (...) { restoreSystemProxy(); throw; }
+            auto appliedValues = [&](const QString &method, const QVariantList &args = QVariantList()) { return QJsonArray::fromVariantList(call(method, args)); };
+            QJsonObject applied{{"mode", appliedValues("GetProxyMethod")}, {"pac", appliedValues("GetAutoProxy")}, {"bypass", appliedValues("GetProxyIgnoreHosts")}};
+            for (const auto &kind : {"http", "https", "socks", "ftp"}) applied[kind] = appliedValues("GetProxy", {QString(kind)});
+            snapshot["applied"] = applied; writeFile(snapshotPath, QJsonDocument(snapshot).toJson());
+        } catch (...) { restoreSystemProxy(true); throw; }
         return;
     }
     const auto schemas = gsettings({"list-schemas"});
@@ -562,6 +638,9 @@ void setSystemProxy(const QString &mode, int port, const QString &pacUrl, const 
         }
         if (mode == "auto") gsettings({"set", schema, "autoconfig-url", pacUrl});
         gsettings({"set", schema, "mode", mode});
-    } catch (...) { restoreSystemProxy(); throw; }
+        QJsonArray applied;
+        for (const auto &entry : values) { auto item = entry.toObject(); item["value"] = QString::fromUtf8(gsettings({"get", item["schema"].toString(), item["key"].toString()})); applied.append(item); }
+        snapshot["appliedValues"] = applied; writeFile(path, QJsonDocument(snapshot).toJson());
+    } catch (...) { restoreSystemProxy(true); throw; }
 }
 }

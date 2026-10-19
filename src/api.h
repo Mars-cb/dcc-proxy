@@ -14,6 +14,7 @@ class Api : public QObject {
 public:
     using Done = std::function<void(const QJsonValue &, const QString &)>;
     explicit Api(QObject *parent = nullptr);
+    void setCallbackWrapper(std::function<Done(Done)> wrapper) { m_callbackWrapper = std::move(wrapper); }
     ~Api() override;
     bool configure(const QString &endpoint, const QString &secret, QString *error = nullptr);
     void request(const QByteArray &method, const QString &path, const QJsonObject &body, Done done, int timeoutMs = 12000);
@@ -34,8 +35,10 @@ private:
     quint64 m_generation = 0;
     QSet<QNetworkReply *> m_pending;
     QMap<QString, QPointer<QNetworkReply>> m_streams;
+    std::function<Done(Done)> m_callbackWrapper;
 };
 void serviceRequest(const QJsonObject &command, QObject *context, Api::Done done);
 using SubscriptionDone = std::function<void(const QByteArray &, const QJsonObject &, const QString &)>;
 void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPort, QObject *context, SubscriptionDone done);
+void validateAndCommit(const QString &root, const QJsonObject &change, QObject *context, Api::Done done, bool commit = true);
 }

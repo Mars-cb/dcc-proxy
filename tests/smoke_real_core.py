@@ -256,13 +256,14 @@ def main():
             while time.monotonic() < deadline:
                 metadata = json.loads((root / "profiles.json").read_text())["profiles"][0]
                 state = command({"action": "status"})
-                if metadata.get("updated") != "1970-01-01T00:00:00Z" and state.get("running") and state.get("pid") != before_update_pid and not state.get("busy"):
+                if metadata.get("updated") != "1970-01-01T00:00:00Z" and state.get("running") and not state.get("busy"):
                     break
                 time.sleep(.1)
             else: raise AssertionError("Active subscription update did not finish")
+            assert state["pid"] == before_update_pid, "Unchanged subscription restarted the core"
             assert Target.subscription_user_agent == "Mozilla/5.0", Target.subscription_user_agent
             assert through_proxy() == b"dcc-proxy-real-core-ok"
-            print("PASS subscription refresh uses a neutral User-Agent, preserves controlled ports and applies the active configuration")
+            print("PASS unchanged subscription refresh preserves core PID, traffic and controlled ports")
             crashed_pid = command({"action": "status"})["pid"]
             os.kill(crashed_pid, signal.SIGKILL)
             deadline = time.monotonic() + 15

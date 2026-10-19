@@ -2,6 +2,7 @@
 #include "interface/moduleinterface.h"
 #include <QPointer>
 namespace Party { class Panel; }
+class QAbstractItemView;
 class ProxyPlugin : public QObject, public DCC_NAMESPACE::ModuleInterface {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID ModuleInterface_iid FILE "api.json")
@@ -22,8 +23,13 @@ public:
     QString description() const { return tr("节点选择、订阅与代理设置"); }
 public slots:
     void active() override;
+    void showPage(const QString &page) override { load(page); }
     void addChildPageTrans() const override;
 private:
     void initSearchData() override;
+    int selectPage(const QString &page);
+    QPointer<QWidget> m_navigation;
+    QPointer<QAbstractItemView> m_pageList;
     QPointer<Party::Panel> m_panel;
+    QString m_selectedPage = "Overview";
 };

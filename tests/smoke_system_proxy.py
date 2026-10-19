@@ -119,7 +119,10 @@ def main():
             started_pid = started['pid']
             bad = root/'invalid.yaml'
             bad.write_text('mixed-port: invalid-port\n')
-            bad_profile = subprocess.check_output([str(Path(args.service).resolve()), '--import', str(bad)], env=env, text=True).strip()
+            rejected = subprocess.run([str(Path(args.service).resolve()), '--import', str(bad)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert rejected.returncode != 0, 'Invalid imports must be rejected before saving'
+            bad_profile = '00000000-0000-4000-8000-000000000099'
+            (root/'profiles'/(bad_profile+'.yaml')).write_bytes(bad.read_bytes())
             failed = command(action='start', profile=bad_profile)
             assert 'error' in failed
             assert command(action='status')['pid'] == started_pid

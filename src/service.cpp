@@ -2,6 +2,7 @@
 #include "api.h"
 #include "tun.h"
 #include "geodata.h"
+#include "restart.h"
 #include <QNetworkInterface>
 #include <QDBusConnection>
 #include <QCoreApplication>
@@ -30,6 +31,7 @@
 #include <QTextStream>
 #include <QThread>
 #include <QSocketNotifier>
+#include <QCryptographicHash>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QUdpSocket>
@@ -49,7 +51,8 @@ public:
     {
         if (!m_lock.tryLock()) throw std::runtime_error("Background service is already running");
         m_network.setProxy(QNetworkProxy::NoProxy);
-        try { restoreSystemProxy(); } catch (const std::exception &e) { log(QByteArray(e.what()) + '\n'); }
+        m_orphan = findOrphanCore(dataDir(), m_store.managedSettings()["core"].toString());
+        if (m_orphan.isEmpty()) try { restoreSystemProxy(); } catch (const std::exception &e) { log(QByteArray(e.what()) + '\n'); }
         connect(&m_pacServer, &QTcpServer::newConnection, this, [this] {
             while (auto *socket = m_pacServer.nextPendingConnection()) {
                 socket->setParent(this);
@@ -115,31 +118,90 @@ public:
         connect(&m_core, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             [this](int code, QProcess::ExitStatus exitStatus) {
                 log(QString("Core exited: %1\n").arg(code).toUtf8());
-                if (!m_stopping && m_wanted && (code != 0 || exitStatus == QProcess::CrashExit) && ++m_failures <= 3) {
-                    const auto epoch = m_restartEpoch;
-                    QTimer::singleShot(3000, this, [this, epoch] {
-                        if (!m_wanted || epoch != m_restartEpoch) return;
-                        try { startCore(m_profile, [](QJsonObject) {}, true); } catch (const std::exception &e) { m_error = QString::fromUtf8(e.what()); }
-                    });
+                Q_UNUSED(exitStatus)
+                if (!m_stopping && m_wanted && !m_busy) {
+                    if (!m_failureWindow.isValid() || m_failureWindow.elapsed() > 60000 || m_coreUptime.elapsed() > 60000) {
+                        m_failureWindow.start(); m_failures = 0;
+                    }
+                    if (++m_failures <= 3) {
+                        const auto epoch = m_restartEpoch;
+                        QTimer::singleShot(1000 * m_failures, this, [this, epoch] {
+                            if (!m_wanted || epoch != m_restartEpoch) return;
+                            try {
+                                const auto path = dataDir() + "/work/last-good.yaml";
+                                const auto good = QFile::exists(path) ? readFile(path) : m_store.runtime(m_profile);
+                                startCore(m_profile, [this](QJsonObject result) {
+                                    if (!result["error"].toString().isEmpty() && !result["running"].toBool()) {
+                                        const auto error = result["error"].toString(); stopCore();
+                                        m_error = "自动恢复失败，已恢复原系统代理：" + error;
+                                    }
+                                }, true, true, false, good);
+                            } catch (const std::exception &e) { m_wanted = false; stopCore(); m_error = QString::fromUtf8(e.what()); }
+                        });
+                    } else {
+                        m_wanted = false; ++m_restartEpoch; stopCore();
+                        m_error = "内核在一分钟内多次退出，自动恢复已暂停，系统代理已恢复";
+                    }
                 }
                 m_stopping = false;
             });
         connect(&m_updateTimer, &QTimer::timeout, this, [this] { updateProfiles(); });
         m_updateTimer.start(60000);
-        const auto s = m_store.settings();
-        if (s["autoStart"].toBool() && !s["active"].toString().isEmpty())
+        m_applyTimer.setInterval(1000);
+        connect(&m_applyTimer, &QTimer::timeout, this, [this] {
+            if (!m_pendingApply || m_busy || m_core.state() != QProcess::Running) return;
+            m_pendingApply = false;
+            try { startCore(m_profile, [](QJsonObject) {}, false, true, true); }
+            catch (const std::exception &e) { log(QByteArray(e.what()) + '\n'); }
+        });
+        m_applyTimer.start();
+        const auto s = m_store.managedSettings();
+        const auto restartPath = dataDir() + "/service-restart.json";
+        const auto restart = readJson(restartPath);
+        if (validId(restart["token"].toString()) && QDateTime::currentSecsSinceEpoch() - qint64(restart["created"].toDouble()) < 300 && localController(m_store.settings()["endpoint"].toString())) {
+            QFile::remove(restartPath);
+            m_serviceRestart = {{"token", restart["token"]}, {"complete", false}};
+            QTimer::singleShot(0, this, [this, restart] { resumeServiceRestart(restart); });
+        } else if (s["autoStart"].toBool() && !s["active"].toString().isEmpty())
             QTimer::singleShot(0, this, [this, s] {
                 try { startCore(s["active"].toString(), [](QJsonObject) {}); }
                 catch (const std::exception &e) { m_error = QString::fromUtf8(e.what()); log(m_error.toUtf8()); }
             });
     }
     ~Daemon() override {
-        stopCore();
-        try { restoreSystemProxy(); } catch (...) { }
+        if (m_orphan.isEmpty()) { stopCore(); try { restoreSystemProxy(); } catch (...) { } }
         m_server.close(); QLocalServer::removeServer(socketName());
     }
 private:
     using Answer = std::function<void(QJsonObject)>;
+    void resumeServiceRestart(const QJsonObject &restart)
+    {
+        const auto proxy = restart["proxy"].toObject();
+        const auto mode = proxy["mode"].toString();
+        m_systemProxyMode = mode == "manual" || mode == "auto" ? mode : QString();
+        m_systemPacUrl = proxy["pac"].toString(); m_pacBypass.clear();
+        for (const auto &entry : proxy["bypass"].toArray()) m_pacBypass << entry.toString();
+        const auto id = restart["profile"].toString();
+        const auto fallback = QByteArray::fromBase64(restart["fallback"].toString().toLatin1());
+        auto complete = [this](QJsonObject result) {
+            m_serviceRestart["complete"] = true;
+            m_serviceRestart["error"] = result["error"].toString();
+            if (!result["error"].toString().isEmpty() && !result["running"].toBool()) { m_wanted = false; stopCore(); }
+        };
+        auto started = [this, id, fallback, complete](QJsonObject result) {
+            if (result["error"].toString().isEmpty() || result["running"].toBool() || fallback.isEmpty()) { complete(result); return; }
+            const auto error = result["error"].toString();
+            try { startCore(id, [complete, error](QJsonObject recovered) {
+                recovered["error"] = error + (recovered["running"].toBool() ? "\n已恢复重启前可用配置" : "\n恢复失败：" + recovered["error"].toString()); complete(recovered);
+            }, true, true, false, fallback); }
+            catch (const std::exception &e) { complete({{"error", error + "\n恢复失败：" + QString::fromUtf8(e.what())}}); }
+        };
+        try {
+            if (m_systemProxyMode == "auto" && m_systemPacUrl == "http://127.0.0.1:19091/proxy.pac" && !m_pacServer.listen(QHostAddress::LocalHost, 19091))
+                throw std::runtime_error(m_pacServer.errorString().toStdString());
+            startCore(id, started, false, true, false, QByteArray::fromBase64(restart["runtime"].toString().toLatin1()));
+        } catch (const std::exception &e) { started({{"error", QString::fromUtf8(e.what())}}); }
+    }
     void log(const QByteArray &bytes)
     {
         const QString path = dataDir() + "/daemon.log";
@@ -149,10 +211,11 @@ private:
     }
     QJsonObject status() const
     {
-        return {{"running", m_core.state() == QProcess::Running}, {"pid", double(m_core.processId())},
-                {"profile", m_profile}, {"error", m_error}, {"busy", m_busy}, {"root", processRunsAsRoot(m_core.processId())},
+        return {{"running", m_core.state() == QProcess::Running}, {"pid", double(m_core.processId())}, {"daemonPid", double(QCoreApplication::applicationPid())}, {"serviceRestart", m_serviceRestart},
+                {"profile", m_profile}, {"error", m_error}, {"busy", m_busy}, {"version", QCoreApplication::applicationVersion()}, {"orphan", m_orphan},
+                {"capabilities", QJsonArray{"apply", "candidate-validation", "independent-rules", "orphan-recovery", "checkpoint", "restart-state"}}, {"root", processRunsAsRoot(m_core.processId())},
                 {"tun", QJsonObject{{"enable", m_tunEnabled && QNetworkInterface::interfaceFromName(m_tunDevice).isValid()},
-                                     {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.settings()["core"].toString())},
+                                     {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.managedSettings()["core"].toString())},
                                      {"processPermission", processHasTunPermission(m_core.processId())}}}};
     }
     void stopCore(bool restoreProxy = true)
@@ -170,7 +233,7 @@ private:
     }
     void completeStart(Answer answer, int attempt = 0, bool preserveProxy = false)
     {
-        const auto settings = m_store.settings();
+        const auto settings = m_store.managedSettings();
         QUrl url(settings["endpoint"].toString()); url.setPath("/configs");
         QNetworkRequest request(url);
         request.setRawHeader("Authorization", "Bearer " + settings["secret"].toString().toUtf8());
@@ -256,10 +319,29 @@ private:
             }
         });
     }
-    void startCore(const QString &id, Answer answer, bool recovery = false, bool preserveProxy = false, bool hotReload = false)
+    void rememberGood()
+    {
+        const auto work = dataDir() + "/work";
+        writeFile(work + "/last-good.yaml", readFile(work + "/config.yaml"));
+        auto identity = coreIdentity(m_core.processId(), m_core.program(), work);
+        if (!identity.isEmpty()) { identity["profile"] = m_profile; writeFile(work + "/core-instance.json", QJsonDocument(identity).toJson()); }
+        m_orphan = {};
+        writeFile(work + "/last-good.json", QJsonDocument(QJsonObject{{"profile", m_profile}, {"core", m_core.program()}}).toJson());
+    }
+    void synchronizeProxy()
+    {
+        if (m_systemProxyMode.isEmpty()) return;
+        const int port = localProxyPort(m_store);
+        setSystemProxy(m_systemProxyMode, port, m_systemPacUrl, m_pacBypass);
+        m_systemProxyPort = port; m_pacProxyPort = port;
+    }
+    void startCore(const QString &id, Answer answer, bool recovery = false, bool preserveProxy = false, bool hotReload = false, const QByteArray &runtimeOverride = {})
     {
         if (m_busy) { answer({{"error", "A core operation is in progress"}}); return; }
-        const auto settings = m_store.settings();
+        const auto settings = m_store.managedSettings();
+        if (m_core.state() == QProcess::NotRunning && !m_orphan.isEmpty() && coreIdentity(qint64(m_orphan["pid"].toDouble()), m_orphan["core"].toString(), dataDir() + "/work").isEmpty()) m_orphan = {};
+        if (m_core.state() == QProcess::NotRunning && !m_orphan.isEmpty())
+            throw std::runtime_error("检测到本插件遗留内核仍在运行，请先使用“恢复残留内核”；现有代理未停止");
         QString core = settings["core"].toString();
         if (!QFileInfo(core).isExecutable() || !QFileInfo(core).isFile()) throw std::runtime_error("Select an executable Mihomo core in Settings");
         if (QFileInfo(core).canonicalFilePath() == "/usr/lib/dcc-proxy/mihomo" && !hasTunPermission(core))
@@ -268,8 +350,57 @@ private:
         QDir().mkpath(work);
         const int seeded = seedGeoData(work);
         if (seeded) log(QString("已从安装包准备 %1 个地理数据库，无需在线下载\n").arg(seeded).toUtf8());
+        const auto previousPath = work + "/config.yaml";
+        const bool previouslyRunning = m_core.state() == QProcess::Running;
+        const auto oldBytes = previouslyRunning && QFile::exists(previousPath) ? readFile(previousPath) : QByteArray();
+        const auto oldProfile = m_profile; const auto oldPid = m_core.processId();
+        const auto oldProgram = m_core.program(); const auto oldEnvironment = m_core.processEnvironment();
+        const auto oldTun = m_expectedTun; const auto oldDevice = m_tunDevice; const auto oldMixed = m_expectedMixedPort;
+        const auto oldMode = m_systemProxyMode; const auto oldPort = m_systemProxyPort; const auto oldPac = m_systemPacUrl; const auto oldBypass = m_pacBypass;
+        const auto originalAnswer = answer;
+        answer = [this, originalAnswer, previouslyRunning, oldBytes, previousPath, oldProfile, oldPid, oldProgram, oldEnvironment,
+                  oldTun, oldDevice, oldMixed, oldMode, oldPort, oldPac, oldBypass](QJsonObject result) {
+            auto error = result["error"].toString();
+            if (error.isEmpty()) {
+                try { synchronizeProxy(); rememberGood(); originalAnswer(result); return; }
+                catch (const std::exception &e) { error = QString::fromUtf8(e.what()); result["error"] = error; }
+            }
+            bool changed = true;
+            try { changed = !oldBytes.isNull() && QFile::exists(previousPath) && readFile(previousPath) != oldBytes; }
+            catch (...) { }
+            if (!previouslyRunning || oldBytes.isEmpty() || (!changed && m_core.state() == QProcess::Running && m_core.processId() == oldPid)) {
+                originalAnswer(result); return;
+            }
+            try {
+                writeFile(previousPath, oldBytes);
+                m_expectedTun = oldTun; m_tunDevice = oldDevice; m_expectedMixedPort = oldMixed; m_profile = oldProfile;
+                auto settings = m_store.settings(); settings["active"] = oldProfile; m_store.setSettings(settings);
+                m_systemProxyMode = oldMode; m_systemProxyPort = oldPort; m_systemPacUrl = oldPac; m_pacBypass = oldBypass;
+                auto restored = [this, originalAnswer, error](QJsonObject state) {
+                    const auto recoveryError = state["error"].toString();
+                    if (recoveryError.isEmpty()) {
+                        try {
+                            if (m_systemProxyMode == "auto" && m_systemPacUrl == "http://127.0.0.1:19091/proxy.pac" && !m_pacServer.isListening())
+                                if (!m_pacServer.listen(QHostAddress::LocalHost, 19091)) throw std::runtime_error(m_pacServer.errorString().toStdString());
+                            synchronizeProxy(); rememberGood(); state["rolledBack"] = true;
+                        } catch (const std::exception &e) { state["recoveryError"] = QString::fromUtf8(e.what()); }
+                    }
+                    m_error = error + (recoveryError.isEmpty() ? "\n已恢复上次可用配置" : "\n恢复失败：" + recoveryError);
+                    state["error"] = m_error; originalAnswer(state);
+                };
+                m_busy = true; m_wanted = true; m_error.clear(); m_readyTimer.start();
+                if (m_core.state() == QProcess::Running && m_core.processId() == oldPid) { reloadRuntime(restored); return; }
+                stopCore(false); m_core.setProcessEnvironment(oldEnvironment); m_core.setWorkingDirectory(QFileInfo(previousPath).absolutePath());
+                m_core.start(oldProgram, {"-d", QFileInfo(previousPath).absolutePath(), "-f", previousPath});
+                if (!m_core.waitForStarted(2000)) throw std::runtime_error(m_core.errorString().toStdString());
+                m_coreUptime.start(); completeStart(restored, 0, true);
+            } catch (const std::exception &e) {
+                m_busy = false; m_wanted = false; stopCore();
+                result = status(); m_error = error + "\n恢复失败：" + QString::fromUtf8(e.what()); result["error"] = m_error; originalAnswer(result);
+            }
+        };
         const QString candidate = work + "/candidate.yaml";
-        auto runtime = parseConfig(m_store.runtime(id));
+        auto runtime = parseConfig(runtimeOverride.isNull() ? m_store.runtime(id) : runtimeOverride);
         if (runtime["tun"]["enable"].as<bool>() && !hasTunPermission(core)) {
             disableFailedTun("TUN 权限不足，已关闭虚拟网卡开关；请在虚拟网卡页面授权内核后启用");
             runtime = parseConfig(m_store.runtime(id));
@@ -314,7 +445,7 @@ private:
                     if (previous[key.toStdString()]) ownedPorts.insert(previous[key.toStdString()].as<int>());
                 for (const auto &key : QStringList{"mixed-port", "socks-port", "tproxy-port"})
                     if (previous[key.toStdString()]) ownedUdpPorts.insert(previous[key.toStdString()].as<int>());
-                const int controllerPort = QUrl(m_store.settings()["endpoint"].toString()).port(19999);
+                const int controllerPort = QUrl(m_store.managedSettings()["endpoint"].toString()).port(19999);
                 for (const auto &key : proxyPortKeys()) {
                     const int port = config[key.toStdString()] ? config[key.toStdString()].as<int>() : 0;
                     if (port <= 0) continue;
@@ -356,7 +487,7 @@ private:
                 m_readyTimer.start();
                 m_core.start(core, {"-d", work, "-f", work + "/config.yaml"});
                 if (!m_core.waitForStarted(2000)) throw std::runtime_error(m_core.errorString().toStdString());
-                completeStart(answer, 0, preserveProxy);
+                m_coreUptime.start(); completeStart(answer, 0, preserveProxy);
             } catch (const std::exception &e) {
                 m_busy = false; m_wanted = false; ++m_restartEpoch; stopCore(!preserveProxy);
                 m_error = QString::fromUtf8(e.what()); answer({{"error", m_error}});
@@ -389,7 +520,7 @@ private:
         for (const auto &key : proxyPortKeys())
             if (controlled[key.toStdString()]) ports[key] = controlled[key.toStdString()].as<int>();
         validateProxyPorts(ports);
-        const int controller = QUrl(m_store.settings()["endpoint"].toString()).port(19999);
+        const int controller = QUrl(m_store.managedSettings()["endpoint"].toString()).port(19999);
         for (const auto &port : ports)
             if (port.toInt() == controller) throw std::runtime_error("代理端口不能与控制器端口相同");
         const bool running = m_core.state() == QProcess::Running;
@@ -412,7 +543,7 @@ private:
             }
             try {
                 restore();
-                if (m_core.state() == QProcess::Running && m_core.processId() == oldPid) {
+                if (m_core.state() == QProcess::Running && (m_core.processId() == oldPid || result["rolledBack"].toBool())) {
                     m_error = error; auto state = status(); state["error"] = error; answer(state); return;
                 }
                 startCore(id, [this, answer, error](QJsonObject recovered) {
@@ -438,10 +569,10 @@ private:
         auto tun = defaultTunConfig(); if (controlled["tun"]) tun = mergeYaml(tun, controlled["tun"]);
         tun = mergeYaml(tun, parseConfig(QJsonDocument(patch).toJson()));
         const bool enable = tun["enable"].as<bool>();
-        QString id = m_store.settings()["active"].toString();
+        QString id = m_store.managedSettings()["active"].toString();
         if (id.isEmpty() && !m_store.profiles().isEmpty()) id = m_store.profiles().first().toObject()["id"].toString();
         if (enable && id.isEmpty()) { answer({{"error", "请先导入订阅，再启用虚拟网卡"}}); return; }
-        if (enable && !hasTunPermission(m_store.settings()["core"].toString())) {
+        if (enable && !hasTunPermission(m_store.managedSettings()["core"].toString())) {
             answer({{"error", "启用虚拟网卡需要先授权内核"}, {"needsAuthorization", true}}); return;
         }
         const bool running = m_core.state() == QProcess::Running;
@@ -467,6 +598,7 @@ private:
             const auto error = result["error"].toString();
             try {
                 restore();
+                if (result["rolledBack"].toBool()) { answer(result); return; }
                 if (running) {
                     startCore(id, [this, answer, error](QJsonObject recovered) {
                         const auto recoveryError = recovered["error"].toString();
@@ -490,7 +622,7 @@ private:
     {
         m_readyTimer.start();
         m_busy = true; m_error.clear();
-        const auto settings = m_store.settings(); QUrl url(settings["endpoint"].toString()); url.setPath("/configs"); url.setQuery("force=true");
+        const auto settings = m_store.managedSettings(); QUrl url(settings["endpoint"].toString()); url.setPath("/configs"); url.setQuery("force=true");
         QNetworkRequest request(url); request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
         request.setRawHeader("Authorization", "Bearer " + settings["secret"].toString().toUtf8());
         auto *reply = m_network.put(request, QJsonDocument(QJsonObject{{"path", dataDir() + "/work/config.yaml"}}).toJson());
@@ -504,7 +636,63 @@ private:
     void handle(const QJsonObject &command, Answer answer)
     {
         const auto action = command["action"].toString();
+        if (action != "status" && action != "quit" && action != "update" && !localController(m_store.settings()["endpoint"].toString()))
+            throw std::runtime_error("当前连接远程控制器，本地内核和系统代理管理已禁用");
         if (action == "status") { answer(status()); return; }
+        if (action == "restart-state") {
+            if (m_busy) { answer({{"error", "后台正在操作，请稍后重试"}}); return; }
+            answer({{"proxy", QJsonObject{{"mode", m_systemProxyMode.isEmpty() ? "none" : m_systemProxyMode}, {"pac", m_systemPacUrl}, {"bypass", QJsonArray::fromStringList(m_pacBypass)}}}}); return;
+        }
+        if (action == "recover-orphan") {
+            if (m_busy || m_core.state() != QProcess::NotRunning) throw std::runtime_error("当前已有受管内核或操作正在进行");
+            const auto identity = findOrphanCore(dataDir(), m_store.managedSettings()["core"].toString());
+            if (identity.isEmpty() || !identity["verified"].toBool()) throw std::runtime_error("未找到可确认归属的残留内核，未终止任何进程");
+            const auto profile = identity["profile"].toString(m_store.managedSettings()["active"].toString());
+            if (!validId(profile)) throw std::runtime_error("恢复配置无效，保留当前残留内核");
+            const auto candidate = m_store.runtime(profile);
+            const auto oldRuntime = readFile(dataDir() + "/work/config.yaml");
+            m_busy = true;
+            validateAndCommit(dataDir(), {}, this, [this, identity, profile, candidate, oldRuntime, answer](const QJsonValue &, const QString &error) {
+                if (!error.isEmpty()) { m_busy = false; answer({{"error", error}}); return; }
+                const auto pid = qint64(identity["pid"].toDouble());
+                const auto checked = coreIdentity(pid, identity["core"].toString(), identity["work"].toString());
+                if (checked["start"] != identity["start"] || checked["arguments"] != identity["arguments"]) { m_busy = false; answer({{"error", "校验期间进程身份发生变化，未停止任何进程"}}); return; }
+                if (::kill(pid_t(pid), SIGTERM) != 0) { m_busy = false; answer({{"error", "无法停止已核实的残留内核"}}); return; }
+                auto *timer = new QTimer(this); auto elapsed = QSharedPointer<QElapsedTimer>::create(); elapsed->start();
+                connect(timer, &QTimer::timeout, this, [this, timer, elapsed, identity, pid, profile, candidate, oldRuntime, answer] {
+                    const auto current = coreIdentity(pid, identity["core"].toString(), identity["work"].toString());
+                    if (current.isEmpty() || current["start"] != identity["start"]) {
+                        timer->stop(); timer->deleteLater(); m_busy = false; m_orphan = {};
+                        auto complete = [this, profile, oldRuntime, answer](QJsonObject result) {
+                            if (result["error"].toString().isEmpty() || result["running"].toBool()) { answer(result); return; }
+                            const auto error = result["error"].toString();
+                            try { startCore(profile, [answer, error](QJsonObject recovered) { recovered["rolledBack"] = recovered["running"].toBool(); recovered["error"] = error + "\n已尝试恢复残留内核原配置"; answer(recovered); }, true, false, false, oldRuntime); }
+                            catch (const std::exception &e) { answer({{"error", error + "\n恢复原配置失败：" + QString::fromUtf8(e.what())}}); }
+                        };
+                        try { startCore(profile, complete, false, false, false, candidate); }
+                        catch (const std::exception &e) { complete({{"error", QString::fromUtf8(e.what())}}); }
+                    } else if (elapsed->elapsed() > 5000) {
+                        timer->stop(); timer->deleteLater(); m_busy = false; answer({{"error", "残留内核未退出，保留进程并停止恢复；请手动检查"}});
+                    }
+                }); timer->start(100);
+            }, false); return;
+        }
+        if (action == "checkpoint") {
+            if (m_busy || m_core.state() != QProcess::Running) { answer({{"error", "内核暂时不能记录配置检查点"}}); return; }
+            const auto patch = command["patch"].toObject();
+            for (auto it = patch.begin(); it != patch.end(); ++it)
+                if ((it.key() != "mode" || !QStringList{"rule", "global", "direct"}.contains(it.value().toString())) &&
+                    (it.key() != "log-level" || !QStringList{"debug", "info", "warning", "error", "silent"}.contains(it.value().toString())))
+                    throw std::runtime_error("不支持的配置检查点字段");
+            const auto path = dataDir() + "/work/config.yaml";
+            writeFile(path, emitYaml(mergeYaml(parseConfig(readFile(path)), parseConfig(QJsonDocument(patch).toJson()))));
+            rememberGood(); answer({{"ok", true}}); return;
+        }
+        if (action == "apply") {
+            if (m_core.state() != QProcess::Running) { answer({{"running", false}, {"message", "配置已保存，下次启动生效"}}); return; }
+            const auto id = command["profile"].toString(m_profile);
+            startCore(id, answer, false, true, true); return;
+        }
         if (action == "tun") { if (!command["options"].isObject()) throw std::runtime_error("无效的虚拟网卡配置"); configureTun(command["options"].toObject(), answer); return; }
         if (action == "ports") { if (!command["options"].isObject()) throw std::runtime_error("无效的代理端口配置"); configurePorts(command["options"].toObject(), answer); return; }
         if (action == "repair-tun") { repairTun(answer); return; }
@@ -514,7 +702,7 @@ private:
         }
         if (action == "start" || action == "restart") {
             QString id = command["profile"].toString();
-            if (id.isEmpty()) id = m_store.settings()["active"].toString();
+            if (id.isEmpty()) id = m_store.managedSettings()["active"].toString();
             if (id.isEmpty()) {
                 const auto profiles = m_store.profiles();
                 if (profiles.isEmpty()) throw std::runtime_error("请先导入订阅，再启动内核");
@@ -536,7 +724,7 @@ private:
                 try { setSystemProxy(m_systemProxyMode, m_systemProxyPort, m_systemPacUrl, bypass); }
                 catch (...) { m_systemProxyMode.clear(); m_pacServer.close(); throw; }
             }
-            auto settings = m_store.settings();
+            auto settings = m_store.managedSettings();
             settings["proxyBypass"] = QJsonArray::fromStringList(bypass);
             m_store.setSettings(settings);
             m_pacBypass = bypass;
@@ -554,7 +742,7 @@ private:
             }
             const int port = command["port"].toInt();
             QString pac = command["pac"].toString();
-            const auto settings = m_store.settings();
+            const auto settings = m_store.managedSettings();
             QStringList bypass = defaultProxyBypass();
             if (settings["proxyBypass"].isArray()) {
                 bypass.clear();
@@ -581,7 +769,7 @@ private:
     }
     void updateProfiles(bool force = false)
     {
-        const auto settings = m_store.settings();
+        const auto settings = m_store.managedSettings();
         const int interval = settings["updateMinutes"].toInt(360);
         if (interval <= 0 && !force) return;
         for (const auto &value : m_store.profiles()) {
@@ -601,10 +789,29 @@ private:
                     bool exists = false;
                     for (const auto &current : m_store.profiles()) if (current.toObject()["id"].toString() == id) exists = true;
                     if (!exists) return;
-                    m_store.saveProfile(p["name"].toString(), p["url"].toString(), bytes, id);
-                    m_store.updateProfileOptions(id, metadata);
-                    log("Subscription updated: " + id.toUtf8() + '\n');
-                    if (id == m_profile && m_core.state() == QProcess::Running) startCore(id, [](QJsonObject) {});
+                    QJsonObject current;
+                    for (const auto &entry : m_store.profiles()) if (entry.toObject()["id"].toString() == id) current = entry.toObject();
+                    if (current["url"] != p["url"]) return;
+                    const auto normalized = normalizeSubscription(bytes);
+                    const bool changed = emitYaml(parseConfig(normalized)) != emitYaml(parseConfig(m_store.profile(id)));
+                    if (!changed) {
+                        // Preserve the scheduler timestamp through the profile store's guarded update.
+                        m_store.saveProfile(current["name"].toString(), current["url"].toString(), m_store.profile(id), id);
+                        m_store.updateProfileOptions(id, metadata); return;
+                    }
+                    m_downloads.insert(id);
+                    QJsonObject change{{"id", id}, {"name", current["name"]}, {"url", current["url"]},
+                                       {"source", QString::fromLatin1(normalized.toBase64())}, {"metadata", metadata}};
+                    validateAndCommit(m_store.root(), change, this, [this, id](const QJsonValue &, const QString &validationError) {
+                        m_downloads.remove(id);
+                        if (!validationError.isEmpty()) { log("Subscription candidate rejected: " + validationError.toUtf8() + '\n'); return; }
+                        log("Subscription updated: " + id.toUtf8() + '\n');
+                        if (id == m_profile && m_core.state() == QProcess::Running) {
+                            if (m_busy) { m_pendingApply = true; return; }
+                            try { startCore(id, [this](QJsonObject state) { if (!state["error"].toString().isEmpty()) log(state["error"].toString().toUtf8() + '\n'); }, false, true, true); }
+                            catch (const std::exception &e) { log(QByteArray(e.what()) + '\n'); }
+                        }
+                    });
                 } catch (const std::exception &e) { log(QByteArray("Subscription update failed: ") + e.what() + '\n'); }
             });
         }
@@ -614,8 +821,11 @@ private slots:
 private:
     QTimer m_resumeTimer;
     QElapsedTimer m_readyTimer;
+    QElapsedTimer m_coreUptime;
+    QElapsedTimer m_failureWindow;
     int m_expectedMixedPort = 0;
     QJsonObject m_expectedTun;
+    QJsonObject m_orphan;
     bool m_tunEnabled = false;
     QString m_tunDevice;
     QString m_tunError;
@@ -632,9 +842,12 @@ private:
     int m_systemProxyPort = 0;
     QLockFile m_lock;
     QTimer m_updateTimer;
+    QTimer m_applyTimer;
+    bool m_pendingApply = false;
     QSet<QString> m_downloads;
     QString m_profile;
     QString m_error;
+    QJsonObject m_serviceRestart;
     int m_failures = 0;
     bool m_stopping = false;
     bool m_busy = false;
@@ -646,12 +859,38 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName("dde-mihomo-daemon");
+    QCoreApplication::setApplicationVersion(DCC_PROXY_VERSION);
     try {
+        if (app.arguments().contains("--restart-service")) {
+            const auto token = app.arguments().value(app.arguments().indexOf("--restart-service") + 1);
+            if (!validId(token)) throw std::runtime_error("重启请求编号无效");
+            QJsonObject result;
+            try { result = restartServiceProcesses(token); }
+            catch (const std::exception &e) { result["error"] = QString::fromUtf8(e.what()); }
+            result["token"] = token;
+            writeFile(dataDir() + "/restart-result-" + token + ".json", QJsonDocument(result).toJson(QJsonDocument::Compact));
+            QTextStream(stdout) << QJsonDocument(result).toJson(QJsonDocument::Compact) << '\n';
+            return result["error"].toString().isEmpty() ? 0 : 1;
+        }
+        if (app.arguments().contains("--validate-store")) {
+            const int index = app.arguments().indexOf("--validate-store");
+            if (index + 1 >= app.arguments().size()) return 2;
+            QFile input; input.open(stdin, QIODevice::ReadOnly);
+            const auto bytes = input.read(32 * 1024 * 1024 + 1);
+            if (bytes.size() > 32 * 1024 * 1024) throw std::runtime_error("配置请求过大");
+            const auto request = QJsonDocument::fromJson(bytes);
+            if (!request.isObject()) throw std::runtime_error("配置请求无效");
+            QTextStream(stdout) << QJsonDocument(validateStoreChange(app.arguments()[index + 1], request.object())).toJson(QJsonDocument::Compact);
+            return 0;
+        }
         if (app.arguments().contains("--import")) {
             const int i = app.arguments().indexOf("--import");
             if (i + 1 >= app.arguments().size()) return 2;
             Store store;
-            const auto id = store.saveProfile("导入订阅", {}, readFile(app.arguments()[i + 1]));
+            const auto id = newId();
+            QJsonObject change{{"id", id}, {"name", "导入订阅"}, {"url", ""}, {"source", QString::fromLatin1(readFile(app.arguments()[i + 1]).toBase64())}};
+            change["fingerprint"] = validateStoreChange(store.root(), change)["fingerprint"];
+            commitStoreChange(store.root(), change);
             auto settings = store.settings();
             if (app.arguments().contains("--activate") || settings["active"].toString().isEmpty()) { settings["active"] = id; store.setSettings(settings); }
             QTextStream(stdout) << id << '\n';

@@ -9,6 +9,8 @@
 #include "nodeflags.h"
 #include "nodelist.h"
 #include "plugin.h"
+#include <QToolButton>
+#include <QHBoxLayout>
 #include <QtTest>
 #include <QTemporaryDir>
 #include <QJsonDocument>
@@ -28,11 +30,13 @@
 #include <DIconButton>
 #include <QNetworkProxy>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QMessageBox>
 #include <QSslSocket>
 #include <QSslError>
 #include <QTabWidget>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSslCertificate>
 #include <QSslKey>
 #include <QSslConfiguration>
@@ -51,8 +55,18 @@ public:
     QWidget host;
     QPointer<QWidget> page;
     int pushes = 0;
-    void pushWidget(DCC_NAMESPACE::ModuleInterface *const, QWidget *const w, PushType) override { ++pushes; page = w; w->setParent(&host); w->show(); }
-    void popWidget(DCC_NAMESPACE::ModuleInterface *const) override { if (page) { page->setParent(nullptr); page->hide(); page->deleteLater(); page = nullptr; } }
+    QList<QPointer<QWidget>> stack;
+    QHBoxLayout layout{&host};
+    void pushWidget(DCC_NAMESPACE::ModuleInterface *const module, QWidget *const w, PushType) override {
+        while (stack.size() > 1) popWidget(module);
+        ++pushes; stack.append(w); page = w; layout.addWidget(w, stack.size() == 1 ? 1 : 3); w->show();
+    }
+    void popWidget(DCC_NAMESPACE::ModuleInterface *const) override {
+        if (stack.isEmpty()) return;
+        const auto retired = stack.takeLast();
+        if (retired) { layout.removeWidget(retired); retired->setParent(nullptr); retired->hide(); retired->deleteLater(); }
+        page = stack.isEmpty() ? nullptr : stack.last();
+    }
     void setModuleVisible(DCC_NAMESPACE::ModuleInterface *const, const bool) override {}
     void showModulePage(const QString &, const QString &, bool) override {}
     void setModuleSubscriptVisible(const QString &, bool) override {}
@@ -374,7 +388,12 @@ private slots:
             auto click = [&](const QString &text) { for (auto *b : panel.findChildren<QPushButton *>()) if (b->text() == text) { QTest::mouseClick(b, Qt::LeftButton); return true; } return false; };
             for (const auto &section : QStringList{"dns", "sniffer", "hosts", "listeners", "tunnels"}) {
                 QString help; QByteArray example;
-                QTimer::singleShot(30, this, [&] {
+                QTimer::singleShot(15, this, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    if (!dialog) return;
+                    for (auto *button : dialog->findChildren<QPushButton *>()) if (button->text() == "高级 YAML 编辑") { button->click(); break; }
+                });
+                QTimer::singleShot(45, this, [&] {
                     auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
                     if (!dialog) return;
                     if (auto *label = dialog->findChild<QLabel *>("config-editor-help")) help = label->text();
@@ -395,7 +414,7 @@ private slots:
             auto *yaml = panel.findChild<QPlainTextEdit *>("yaml-override-editor"); QVERIFY(yaml); QVERIFY(!yaml->toPlainText().trimmed().isEmpty());
             QVERIFY(panel.findChild<QLabel *>("yaml-override-help")->text().contains("列表整体替换"));
             QVERIFY(parseConfig(yaml->toPlainText().toUtf8())["hosts"]);
-            QVERIFY(click("保存覆写")); QVERIFY(parseConfig(readFile(dir.path() + "/override.yaml"))["hosts"]);
+            QVERIFY(click("保存覆写")); QTRY_VERIFY(QFile::exists(dir.path() + "/override.yaml")); QVERIFY(parseConfig(readFile(dir.path() + "/override.yaml"))["hosts"]);
             panel.openPage("Settings"); auto *secret = panel.findChild<Dtk::Widget::DPasswordEdit *>("api-secret-field"); QVERIFY(secret);
             QVERIFY(secret->echoButtonIsVisible()); QCOMPARE(secret->echoMode(), QLineEdit::Password);
             QAbstractButton *eye = nullptr;
@@ -406,8 +425,10 @@ private slots:
             QTest::mouseClick(eye, Qt::LeftButton); QCOMPARE(secret->echoMode(), QLineEdit::Normal);
             QTest::mouseClick(eye, Qt::LeftButton); QCOMPARE(secret->echoMode(), QLineEdit::Password);
             auto *status = panel.findChild<QLabel *>("proxy-status"); status->setText(QString(5000, QChar('x')) + QString("\n长错误说明").repeated(100));
+            panel.findChild<QScrollArea *>("proxy-message-area")->show();
             panel.resize(460, 520); QTest::qWait(50);
             auto *area = panel.findChild<QScrollArea *>("proxy-message-area"); auto *tabs = panel.findChild<QTabWidget *>(); QVERIFY(area && tabs);
+            QVERIFY(!area->autoFillBackground()); QVERIFY(!area->viewport()->autoFillBackground()); QVERIFY(!status->autoFillBackground());
             QVERIFY2(area->height() <= status->fontMetrics().lineSpacing() * 3 + 8, qPrintable(QString::number(area->height())));
             QVERIFY(tabs->height() >= 250);
             QCOMPARE(panel.width(), 460);
@@ -518,6 +539,8 @@ private slots:
         Store store; auto settings = store.settings(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(http.serverPort()); store.setSettings(settings);
         {
             Panel panel; panel.resize(900, 700); panel.show();
+            auto *restart = panel.findChild<QPushButton *>("restart-proxy-service"); QVERIFY(restart);
+            QCOMPARE(restart->text(), QString("重启服务")); QVERIFY(restart->toolTip().contains("后台")); QVERIFY(restart->toolTip().contains("中断"));
             auto *control = panel.findChild<Dtk::Widget::DSwitchButton *>("core-switch"); QVERIFY(control);
             auto *core = panel.findChild<QLabel *>("overview-core"); auto *stats = panel.findChild<QLabel *>("overview-statistics"); QVERIFY(core); QVERIFY(stats);
             QTRY_VERIFY(core->text().contains("16666")); QTRY_VERIFY(stats->text().contains("连接 1")); QTRY_VERIFY(control->isChecked());
@@ -600,13 +623,13 @@ private slots:
         TestFrame frame; frame.host.resize(900, 650); frame.host.show();
         ProxyPlugin plugin; plugin.setFrameProxy(&frame);
         plugin.active();
-        QPointer<QWidget> retired = plugin.moduleWidget();
+        QPointer<QWidget> retired = frame.page;
         QVERIFY(retired);
-        plugin.load("Proxies"); QCOMPARE(plugin.moduleWidget(), retired.data()); QCOMPARE(frame.pushes, 1);
+        plugin.load("Proxies"); QCOMPARE(frame.page.data(), retired.data()); QCOMPARE(frame.pushes, 2);
         frame.popWidget(&plugin);
         QVERIFY(retired); // deleteLater has deliberately not run yet.
         QCOMPARE(plugin.load("Proxies"), 0);
-        QPointer<QWidget> current = plugin.moduleWidget();
+        QPointer<QWidget> current = frame.page;
         QVERIFY(current); QVERIFY(current != retired);
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QVERIFY(retired.isNull()); QVERIFY(current); QVERIFY(current->isVisible());
@@ -747,12 +770,18 @@ private slots:
             auto *url = panel.findChild<QLineEdit *>("website-rule-url"); auto *add = panel.findChild<QPushButton *>("add-website-rule");
             auto *preview = panel.findChild<QLabel *>("website-rule-preview"); QVERIFY(url); QVERIFY(add); QVERIFY(preview);
             url->setText("https://example.com/path"); QVERIFY(add->isEnabled()); QVERIFY(preview->text().contains("DOMAIN-SUFFIX,example.com,主选择"));
+            const auto original = store.profile(id);
             QTest::mouseClick(add, Qt::LeftButton);
-            QCOMPARE(QString::fromStdString(parseConfig(store.profile(id))["rules"][0].as<std::string>()), QString("DOMAIN-SUFFIX,example.com,主选择"));
-            QVERIFY(url->text().isEmpty()); QVERIFY(!QFile::exists(dir.path()+"/service.sock"));
+            QTRY_VERIFY(!store.customizations()["rules"].toObject()[id].toArray().isEmpty());
+            QCOMPARE(store.profile(id), original);
+            QCOMPARE(QString::fromStdString(parseConfig(store.runtime(id))["rules"][0].as<std::string>()), QString("DOMAIN-SUFFIX,example.com,主选择"));
+            QTRY_VERIFY(url->text().isEmpty()); QVERIFY(!QFile::exists(dir.path()+"/service.sock"));
             const auto previous = store.profile(id); writeFile(dir.path()+"/override.yaml", "rules: [\"MATCH,DIRECT\"]\n");
             url->setText("other.example"); QTest::mouseClick(add, Qt::LeftButton);
-            QCOMPARE(store.profile(id), previous); QVERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("覆写")); panel.hide();
+            QTRY_COMPARE(store.customizations()["rules"].toObject()[id].toArray().size(), 2);
+            QCOMPARE(store.profile(id), previous);
+            QVERIFY(QString::fromStdString(parseConfig(store.runtime(id))["rules"][0].as<std::string>()).contains("other.example"));
+            panel.hide();
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
     }
@@ -896,6 +925,197 @@ private slots:
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
     }
+    void durableCustomizationsAndExactRestore()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("Persistent", "https://example.invalid/sub", "rules: [\"MATCH,DIRECT\"]\n");
+        const auto clean = backup(dir.path());
+        QJsonObject custom{{"rules", QJsonObject{{id, QJsonArray{"DOMAIN-SUFFIX,keep.example,DIRECT"}}}},
+            {"overrides", QJsonArray{QJsonObject{{"id", newId()}, {"name", "Scoped"}, {"kind", "yaml"}, {"profile", id}, {"content", "mode: direct\n"}, {"enabled", true}}}}};
+        store.setCustomizations(custom);
+        store.saveProfile("Persistent", "https://example.invalid/sub", "rules: [\"MATCH,REJECT\"]\n", id);
+        const auto runtime = parseConfig(store.runtime(id));
+        QCOMPARE(runtime["rules"][0].as<std::string>(), std::string("DOMAIN-SUFFIX,keep.example,DIRECT"));
+        QCOMPARE(runtime["mode"].as<std::string>(), std::string("direct"));
+        auto ordered = custom["overrides"].toArray();
+        ordered.append(QJsonObject{{"id", newId()}, {"kind", "yaml"}, {"profile", id}, {"content", "mode: global\n"}});
+        ordered.append(QJsonObject{{"id", newId()}, {"kind", "javascript"}, {"profile", id}, {"content", "function main(config) { if (config.mode !== 'global') throw new Error('wrong override order'); config.mode = 'rule'; return config; }"}});
+        ordered.append(QJsonObject{{"id", newId()}, {"kind", "yaml"}, {"profile", id}, {"enabled", false}, {"content", "mode: direct\n"}});
+        custom["overrides"] = ordered; store.setCustomizations(custom);
+        QCOMPARE(parseConfig(store.runtime(id))["mode"].as<std::string>(), std::string("rule"));
+        const auto other = store.saveProfile("Other", {}, "rules: [\"MATCH,DIRECT\"]\n");
+        QVERIFY(!parseConfig(store.runtime(other))["mode"]);
+        writeFile(dir.path() + "/override.yaml", "rules: [\"MATCH,REJECT\"]\n");
+        restore(dir.path(), clean);
+        QVERIFY(!QFile::exists(dir.path() + "/override.yaml")); QVERIFY(!QFile::exists(dir.path() + "/customizations.json"));
+        QVERIFY(!QFile::exists(store.profilePath(other))); QCOMPARE(store.profiles().size(), 1);
+        QVERIFY(QFile::exists(dir.path() + "/before-restore.json"));
+    }
+    void completeCandidateValidationBeforeCommit()
+    {
+        if (testCore().isEmpty()) QSKIP("Requires the bundled core");
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("Candidate", {}, "rules: [\"MATCH,DIRECT\"]\n");
+        auto settings = store.settings(); settings["core"] = testCore(); store.setSettings(settings);
+        const auto initial = configFingerprint(dir.path());
+        QJsonObject bad{{"files", QJsonObject{{"override.yaml", QString::fromLatin1(QByteArray("mixed-port: invalid\n").toBase64())}}}};
+        QVERIFY_EXCEPTION_THROWN(validateStoreChange(dir.path(), bad), std::runtime_error);
+        QCOMPARE(configFingerprint(dir.path()), initial); QVERIFY(!QFile::exists(dir.path() + "/override.yaml"));
+        auto scriptedSettings = settings; scriptedSettings["scriptEnabled"] = true;
+        QJsonObject badScript{{"files", QJsonObject{
+            {"settings.json", QString::fromLatin1(QJsonDocument(scriptedSettings).toJson().toBase64())},
+            {"override.js", QString::fromLatin1(QByteArray("function main(config) { throw new Error('candidate script rejected'); }").toBase64())}}}};
+        QVERIFY_EXCEPTION_THROWN(validateStoreChange(dir.path(), badScript), std::runtime_error);
+        QCOMPARE(configFingerprint(dir.path()), initial); QVERIFY(!QFile::exists(dir.path() + "/override.js"));
+        QJsonObject custom{{"rules", QJsonObject{{id, QJsonArray{"DOMAIN-SUFFIX,valid.example,DIRECT"}}}}};
+        QJsonObject change{{"files", QJsonObject{{"customizations.json", QString::fromLatin1(QJsonDocument(custom).toJson().toBase64())}}}};
+        const auto validated = validateStoreChange(dir.path(), change); QVERIFY(validated["valid"].toBool());
+        change["fingerprint"] = validated["fingerprint"];
+        settings["updateMinutes"] = 0; store.setSettings(settings);
+        QVERIFY_EXCEPTION_THROWN(commitStoreChange(dir.path(), change), std::runtime_error);
+        QVERIFY(!QFile::exists(dir.path() + "/customizations.json"));
+        change["fingerprint"] = validateStoreChange(dir.path(), change)["fingerprint"];
+        commitStoreChange(dir.path(), change);
+        QVERIFY(store.runtime(id).contains("valid.example"));
+    }
+    void extendedUriFormatsAndTransports()
+    {
+        QJsonObject vmess{{"v", "2"}, {"ps", "VMess WS"}, {"add", "example.com"}, {"port", "443"},
+            {"id", "00000000-0000-4000-8000-000000000001"}, {"aid", "0"}, {"net", "ws"}, {"host", "cdn.example.com"}, {"path", "/websocket"}, {"tls", "tls"}, {"sni", "tls.example.com"}};
+        const QByteArray vmessUri = "vmess://" + QJsonDocument(vmess).toJson(QJsonDocument::Compact).toBase64();
+        auto b64 = [](const QByteArray &bytes) { return bytes.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals); };
+        const QByteArray ssr = "ssr://" + b64("example.com:443:auth_sha1_v4:aes-128-cfb:tls1.2_ticket_auth:" + b64("pass:word") + "/?remarks=" + b64("SSR sample") + "&obfsparam=" + b64("cdn.example.com"));
+        const QByteArray legacy = "ss://" + b64("aes-128-gcm:pa:ss@example.com:8388") + "#Legacy";
+        const QByteArray vless = "vless://00000000-0000-4000-8000-000000000001@example.com:443?security=tls&type=h2&host=cdn.example.com&path=%2Fstream#H2";
+        const auto yaml = normalizeSubscription(vmessUri + '\n' + ssr + '\n' + legacy + '\n' + vless);
+        const auto config = parseConfig(yaml); QCOMPARE(config["proxies"].size(), size_t(4));
+        QCOMPARE(config["proxies"][0]["ws-opts"]["headers"]["Host"].as<std::string>(), std::string("cdn.example.com"));
+        QCOMPARE(config["proxies"][1]["password"].as<std::string>(), std::string("pass:word"));
+        QCOMPARE(config["proxies"][1]["obfs-param"].as<std::string>(), std::string("cdn.example.com"));
+        QCOMPARE(config["proxies"][2]["password"].as<std::string>(), std::string("pa:ss"));
+        QCOMPARE(config["proxies"][3]["h2-opts"]["path"].as<std::string>(), std::string("/stream"));
+        if (!testCore().isEmpty()) {
+            QTemporaryDir dir; writeFile(dir.path() + "/config.yaml", yaml);
+            QProcess core; core.start(testCore(), {"-t", "-d", dir.path(), "-f", dir.path() + "/config.yaml"});
+            QVERIFY(core.waitForFinished(10000)); QVERIFY2(core.exitCode() == 0, core.readAllStandardOutput().constData());
+        }
+        QVERIFY_EXCEPTION_THROWN(normalizeSubscription("vmess://invalid"), std::runtime_error);
+        const auto exported = parseConfig(normalizeSubscription("proxies: [{name: FromSubStore, type: ss, server: example.com, port: 443, cipher: aes-128-gcm, password: sample}]\n"));
+        QVERIFY(exported["proxy-groups"].IsSequence()); QVERIFY(exported["rules"].IsSequence());
+    }
+    void remoteControllerPreservesManagedIdentity()
+    {
+        QTemporaryDir dir; Store store(dir.path()); const auto id = store.saveProfile("Local", {}, "rules: [\"MATCH,DIRECT\"]\n");
+        auto settings = store.settings(); settings["endpoint"] = "https://remote.example"; settings["secret"] = "remote-token";
+        settings["managedEndpoint"] = "http://127.0.0.1:29999"; settings["managedSecret"] = "local-token"; store.setSettings(settings);
+        QVERIFY(!localController(settings["endpoint"].toString()));
+        const auto runtime = parseConfig(store.runtime(id));
+        QCOMPARE(runtime["external-controller"].as<std::string>(), std::string("127.0.0.1:29999"));
+        QCOMPARE(runtime["secret"].as<std::string>(), std::string("local-token"));
+        QCOMPARE(store.settings()["secret"].toString(), QString("remote-token"));
+    }
+    void structuredDnsFormPreservesAdvancedFields()
+    {
+        if (testCore().isEmpty()) QSKIP("Requires a bundled core");
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        {
+            Store store; const auto id = store.saveProfile("DNS form", {}, "dns: {enable: true, nameserver: [1.1.1.1], fake-ip-filter: ['+.lan'], prefer-h3: true}\nrules: [\"MATCH,DIRECT\"]\n");
+            QTcpServer port; QVERIFY(port.listen(QHostAddress::LocalHost)); const int endpoint = port.serverPort(); port.close();
+            auto settings = store.settings(); settings["core"] = testCore(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(endpoint); store.setSettings(settings);
+            const auto original = store.profile(id);
+            Panel panel; panel.show();
+            bool formSeen = false;
+            QTimer::singleShot(30, this, [&] {
+                auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); if (!dialog) return;
+                auto *edit = dialog->findChild<QPlainTextEdit *>("dns-nameserver"); if (!edit) { dialog->reject(); return; }
+                formSeen = true; edit->setPlainText("9.9.9.9");
+                dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+            });
+            bool clicked = false; for (auto *button : panel.findChildren<QPushButton *>()) if (button->text() == "DNS") { button->click(); clicked = true; break; }
+            QVERIFY(clicked); QVERIFY(formSeen);
+            QTRY_COMPARE(store.customizations()["overrides"].toArray().size(), 1);
+            const auto runtime = parseConfig(store.runtime(id));
+            QCOMPARE(runtime["dns"]["nameserver"][0].as<std::string>(), std::string("9.9.9.9"));
+            QCOMPARE(runtime["dns"]["fake-ip-filter"][0].as<std::string>(), std::string("+.lan"));
+            QVERIFY(runtime["dns"]["prefer-h3"].as<bool>()); QCOMPARE(store.profile(id), original);
+            QVERIFY(!QFile::exists(dir.path() + "/service.sock")); panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void diagnosticDoesNotMutateConfiguration()
+    {
+        if (testCore().isEmpty()) QSKIP("Requires a bundled core");
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        {
+            QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost)); int mutations = 0;
+            connect(&server, &QTcpServer::newConnection, this, [&] {
+                while (auto *socket = server.nextPendingConnection()) {
+                    auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                    connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                        *buffer += socket->readAll(); if (!buffer->contains("\r\n\r\n")) return;
+                        if (!buffer->startsWith("GET ")) ++mutations;
+                        QByteArray body = "{}";
+                        if (buffer->startsWith("GET /configs ")) body = QJsonDocument(QJsonObject{{"mode", "direct"}, {"mixed-port", server.serverPort()}}).toJson();
+                        if (buffer->startsWith("GET /version ")) body = "{\"version\":\"fixture\"}";
+                        if (buffer->startsWith("GET /dns/query?")) body = "{\"Answer\":[{\"data\":\"127.0.0.1\"}]}";
+                        socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                    });
+                }
+            });
+            Store store; store.saveProfile("Diagnostic", {}, "rules: [\"MATCH,DIRECT\"]\n");
+            auto settings = store.settings(); settings["core"] = testCore(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+            QLocalServer ipc; QVERIFY(ipc.listen(dir.path() + "/service.sock")); int controlChanges = 0;
+            connect(&ipc, &QLocalServer::newConnection, this, [&] {
+                while (auto *socket = ipc.nextPendingConnection()) {
+                    connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                    connect(socket, &QLocalSocket::readyRead, socket, [&, socket] {
+                        const auto command = QJsonDocument::fromJson(socket->readAll()).object(); if (command["action"].toString() != "status") ++controlChanges;
+                        socket->write(QJsonDocument(QJsonObject{{"running", true}, {"version", QStringLiteral(DCC_PROXY_VERSION)}, {"pid", 123}}).toJson(QJsonDocument::Compact) + '\n'); socket->flush(); socket->disconnectFromServer();
+                    });
+                }
+            });
+            Panel panel; panel.show(); panel.openPage("Tools"); const auto before = configFingerprint(dir.path());
+            panel.findChild<QPushButton *>("diagnose-network")->click();
+            auto *target = panel.findChild<QLineEdit *>("diagnostic-target"); QVERIFY(target); target->setText(QString("http://127.0.0.1:%1/test").arg(server.serverPort()));
+            auto *run = panel.findChild<QPushButton *>("diagnostic-run"); run->click();
+            auto *report = panel.findChild<QPlainTextEdit *>("diagnostic-report"); QVERIFY(report);
+            QTRY_VERIFY(report->toPlainText().contains("实际代理请求：收到 HTTP 200"));
+            QTRY_VERIFY(report->toPlainText().contains("磁盘完整候选配置：校验通过")); QTRY_VERIFY(run->isEnabled());
+            QCOMPARE(mutations, 0); QCOMPARE(controlChanges, 0); QCOMPARE(configFingerprint(dir.path()), before); panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
+    void substoreListsAndImportsConvertedNodes()
+    {
+        if (testCore().isEmpty()) QSKIP("Requires a bundled core");
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        {
+            QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost)); QStringList requests;
+            connect(&server, &QTcpServer::newConnection, this, [&] {
+                while (auto *socket = server.nextPendingConnection()) {
+                    auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                    connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                        *buffer += socket->readAll(); if (!buffer->contains("\r\n\r\n")) return;
+                        requests << QString::fromUtf8(buffer->split(' ').value(1)); QByteArray body = "{}";
+                        if (buffer->startsWith("GET /api/subs ")) body = "{\"status\":\"success\",\"data\":[{\"name\":\"Sample\",\"source\":\"remote\"}]}";
+                        else if (buffer->startsWith("GET /api/collections ")) body = "{\"status\":\"success\",\"data\":{\"Combo\":{\"name\":\"Combo\",\"subscriptions\":[\"Sample\"]}}}";
+                        else if (buffer->startsWith("GET /download/sub/Sample?target=ClashMeta ")) body = "proxies: [{name: FromSubStore, type: anytls, server: example.com, port: 443, password: sample}]\n";
+                        socket->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                    });
+                }
+            });
+            Store store; auto settings = store.settings(); settings["core"] = testCore(); settings["substoreUrl"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+            Panel panel; panel.show(); panel.openPage("Tools"); panel.findChild<QPushButton *>("manage-substore")->click();
+            auto *table = panel.findChild<QTableWidget *>("substore-items"); QVERIFY(table);
+            panel.findChild<QPushButton *>("substore-refresh")->click(); QTRY_COMPARE(table->rowCount(), 2);
+            for (int row = 0; row < table->rowCount(); ++row) if (table->item(row, 1)->text() == "Sample") table->setCurrentCell(row, 0);
+            panel.findChild<QPushButton *>("substore-import")->click(); QTRY_COMPARE(store.profiles().size(), 1);
+            const auto imported = parseConfig(store.profile(store.profiles()[0].toObject()["id"].toString()));
+            QCOMPARE(imported["proxies"][0]["type"].as<std::string>(), std::string("anytls")); QVERIFY(imported["proxy-groups"].IsSequence());
+            QVERIFY(requests.contains("/download/sub/Sample?target=ClashMeta")); QVERIFY(!QFile::exists(dir.path() + "/service.sock")); panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void backupRestore()
     {
         QTemporaryDir a, b; Store store(a.path());
@@ -1020,7 +1240,8 @@ private slots:
             QVERIFY(!panel.findChild<QPushButton *>("test-selected-node"));
             QVERIFY(!panel.findChild<QPushButton *>("select-node"));
             QTRY_COMPARE(nodes->count(), 2);
-            QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("已连接"));
+            QTRY_VERIFY(panel.findChild<QLabel *>("overview-core")->text().contains("内核已连接"));
+            QVERIFY(panel.findChild<QLabel *>("proxy-status")->text().isEmpty());
             QPersistentModelIndex persistent(nodes->model()->index(0, 0));
             auto *first = nodes->item(0);
             nodes->setCurrentRow(0);
@@ -1055,6 +1276,22 @@ private slots:
             QCOMPARE(nodes->currentRow(), 0); QCOMPARE(switchRequests, 0); QCOMPARE(delayRequests, 4);
             QTest::mouseClick(refresh, Qt::LeftButton); QTest::qWait(80);
             QVERIFY(persistent.isValid()); QCOMPARE(nodes->item(0), first); QCOMPARE(first->data(NodeDelayRole).toInt(), 245);
+            // Additional clicks must join the running batch, keep their own URL, and never select nodes.
+            testUrl->setText("https://parallel-a.example/204");
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->delayRect(first).center());
+            QVERIFY(first->data(NodeTestingRole).toBool());
+            testUrl->setText("https://parallel-b.example/204");
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->delayRect(nodes->item(1)).center());
+            QVERIFY(first->data(NodeTestingRole).toBool()); QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool());
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->delayRect(first).center());
+            QTRY_COMPARE(delayRequests, 6);
+            QCOMPARE(testedUrls[testedUrls.size() - 2], QString("https://parallel-a.example/204"));
+            QCOMPARE(testedUrls.last(), QString("https://parallel-b.example/204"));
+            QCOMPARE(switchRequests, 0);
+            QTRY_VERIFY(!first->data(NodeTestingRole).toBool());
+            QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool());
+            QTRY_VERIFY(!nodes->item(1)->data(NodeTestingRole).toBool());
+            QCOMPARE(delayRequests, 6); QCOMPARE(nodes->currentRow(), 0);
             panel.hide();
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
@@ -1078,6 +1315,167 @@ private slots:
         QTRY_VERIFY(complete); QVERIFY2(error.isEmpty(), qPrintable(error));
         QVERIFY(request.startsWith("PUT /proxies/%E7%BB%84%2F%E6%97%A5%E6%9C%AC HTTP/1.1"));
         QVERIFY(request.contains("Authorization: Bearer test-secret"));
+    }
+    void restartButtonReplacesDaemonAndCore()
+    {
+        if (testCore().isEmpty()) QSKIP("Requires the bundled core");
+        QTemporaryDir dir; const auto previous = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        QProcess original;
+        struct Cleanup {
+            QByteArray previous;
+            QProcess *original;
+            ~Cleanup() {
+                QLocalSocket socket; socket.connectToServer(socketName());
+                if (socket.waitForConnected(500)) { socket.write("{\"action\":\"quit\"}\n"); socket.waitForBytesWritten(500); socket.waitForReadyRead(2000); }
+                if (original->state() != QProcess::NotRunning) original->waitForFinished(5000);
+                if (previous.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", previous);
+            }
+        } cleanup{previous, &original};
+        QTcpServer controller, listener; QVERIFY(controller.listen(QHostAddress::LocalHost)); QVERIFY(listener.listen(QHostAddress::LocalHost));
+        const auto controllerPort = controller.serverPort(), mixedPort = listener.serverPort(); controller.close(); listener.close();
+        Store store; const auto id = store.saveProfile("Restart button", {}, QString("mixed-port: %1\nmode: direct\nrules: [\"MATCH,DIRECT\"]\n").arg(mixedPort).toUtf8());
+        auto settings = store.settings(); settings["core"] = testCore(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(controllerPort); settings["active"] = id; settings["autoStart"] = false; settings["autoSystemProxy"] = false; settings["updateMinutes"] = 0; store.setSettings(settings);
+        auto env = QProcessEnvironment::systemEnvironment(); env.insert("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent"); env.insert("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nonexistent"); original.setProcessEnvironment(env); original.start(serviceExecutable(), {"--daemon"});
+        QVERIFY(original.waitForStarted()); const auto firstDaemon = original.processId();
+        QTRY_VERIFY(QFile::exists(socketName()));
+        QJsonObject started; bool completed = false;
+        serviceRequest({{"action", "start"}}, this, [&](const QJsonValue &value, const QString &) { started = value.toObject(); completed = true; });
+        QTRY_VERIFY_WITH_TIMEOUT(completed, 20000); QVERIFY2(started["running"].toBool(), qPrintable(started["error"].toString()));
+        {
+            Panel panel; panel.show(); auto *restart = panel.findChild<QPushButton *>("restart-proxy-service"); QVERIFY(restart); QTRY_VERIFY(restart->isEnabled());
+            QTest::mouseClick(restart, Qt::LeftButton); QVERIFY(!restart->isEnabled());
+            QTRY_VERIFY_WITH_TIMEOUT(restart->isEnabled(), 30000);
+            QJsonObject current; completed = false;
+            serviceRequest({{"action", "status"}}, this, [&](const QJsonValue &value, const QString &) { current = value.toObject(); completed = true; });
+            QTRY_VERIFY(completed); QVERIFY(current["running"].toBool()); QVERIFY(current["daemonPid"].toDouble() != firstDaemon); QVERIFY(current["pid"] != started["pid"]);
+            QCOMPARE(current["version"].toString(), QStringLiteral(DCC_PROXY_VERSION));
+            QVERIFY(!QFile::exists(dir.path() + "/system-proxy-before.json"));
+            panel.hide();
+        }
+    }
+    void providersRefreshKeepsRowsAndScopesMessages()
+    {
+        QTemporaryDir dir; const auto previous = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        Store store; auto settings = store.settings(); settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+        int phase = 0, proxyReads = 0, ruleReads = 0, actions = 0, replies = 0, cacheActions = 0;
+        bool failAction = false;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto bytes = QSharedPointer<QByteArray>::create(); auto handled = QSharedPointer<bool>::create(false);
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, bytes, handled] {
+                    *bytes += socket->readAll(); if (*handled || !bytes->contains("\r\n\r\n")) return; *handled = true;
+                    QByteArray body = "{}", status = "200 OK"; int delay = 0; bool resource = false;
+                    if (bytes->startsWith("GET /configs ")) body = R"({"mode":"rule","mixed-port":16666})";
+                    if (bytes->startsWith("GET /providers/proxies ")) {
+                        ++proxyReads; resource = true; QJsonObject providers;
+                        for (int i = 0; i < (phase == 3 ? 29 : 30); ++i) providers[QString("p%1").arg(i, 2, 10, QChar('0'))] = QJsonObject{{"vehicleType", "HTTP"}, {"proxies", QJsonArray{QJsonObject{{"name", "DIRECT"}}}}};
+                        body = QJsonDocument(QJsonObject{{"providers", providers}}).toJson();
+                        if (phase) delay = 200;
+                        if (phase == 2) { status = "500 Internal Server Error"; body = R"({"message":"fixture failure"})"; }
+                    }
+                    if (bytes->startsWith("GET /providers/rules ")) {
+                        ++ruleReads; resource = true;
+                        QJsonObject providers;
+                        if (phase != 3) providers["p00"] = QJsonObject{{"vehicleType", "HTTP"}, {"ruleCount", phase == 2 ? 99 : 7}};
+                        body = QJsonDocument(QJsonObject{{"providers", providers}}).toJson();
+                        if (phase) delay = 650;
+                    }
+                    if (bytes->startsWith("PUT /providers/proxies/")) {
+                        ++actions; delay = 350;
+                        if (failAction) { status = "500 Internal Server Error"; body = R"({"message":"resource action failed"})"; }
+                    }
+                    if (bytes->startsWith("POST /cache/dns/flush ")) ++cacheActions;
+                    QTimer::singleShot(delay, socket, [&, socket, body, status, resource] {
+                        socket->write("HTTP/1.1 " + status + "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                        if (resource) ++replies;
+                    });
+                });
+            }
+        });
+        {
+            Panel panel; panel.resize(750, 480); panel.show(); panel.openPage("Providers");
+            auto *table = panel.findChild<QTableWidget *>("providers"); auto *status = panel.findChild<QLabel *>("proxy-status");
+            auto *refresh = panel.findChild<QPushButton *>("refresh-proxy-panel");
+            QTRY_COMPARE(table->rowCount(), 31); QTRY_COMPARE(replies, 2);
+            auto *messages = panel.findChild<QScrollArea *>("proxy-message-area"); QVERIFY(messages);
+            QVERIFY(status->text().isEmpty()); QVERIFY(messages->isHidden());
+            int selected = -1;
+            for (int row = 0; row < table->rowCount(); ++row) if (table->item(row, 1)->text() == "p15") selected = row;
+            QVERIFY(selected >= 0); table->selectRow(selected); table->scrollToItem(table->item(selected, 0), QAbstractItemView::PositionAtCenter);
+            QTest::qWait(30); const int scroll = table->verticalScrollBar()->value(); QVERIFY(scroll > 0);
+            auto *item = table->item(selected, 1); QPersistentModelIndex persistent(table->model()->index(selected, 1));
+            QSignalSpy removed(table->model(), SIGNAL(rowsRemoved(QModelIndex,int,int)));
+            phase = 1; const int reads = proxyReads + ruleReads; QTest::mouseClick(refresh, Qt::LeftButton);
+            QTRY_COMPARE(proxyReads + ruleReads, reads + 2);
+            QCOMPARE(table->rowCount(), 31); QCOMPARE(table->item(selected, 1), item);
+            QTest::mouseClick(refresh, Qt::LeftButton); QTest::qWait(80); QCOMPARE(proxyReads + ruleReads, reads + 2);
+            QTRY_COMPARE(replies, 4); QVERIFY(persistent.isValid()); QCOMPARE(table->item(selected, 1), item);
+            QCOMPARE(table->currentRow(), selected); QCOMPARE(table->verticalScrollBar()->value(), scroll); QCOMPARE(removed.count(), 0);
+            phase = 2; QTest::mouseClick(refresh, Qt::LeftButton); QTRY_COMPARE(replies, 6);
+            QTRY_VERIFY([&] { for (int row = 0; row < table->rowCount(); ++row) if (table->item(row, 0)->data(Qt::UserRole).toJsonObject()["kind"] == "rules") return table->item(row, 4)->text() == "99"; return false; }());
+            QCOMPARE(table->rowCount(), 31); QCOMPARE(removed.count(), 0); QVERIFY(persistent.isValid());
+            phase = 3; QTest::mouseClick(refresh, Qt::LeftButton); QTRY_COMPARE(replies, 8); QTRY_COMPARE(table->rowCount(), 29);
+            QVERIFY(persistent.isValid()); QCOMPARE(table->item(table->currentRow(), 1)->text(), QString("p15"));
+            for (const auto &page : {"Tools", "Settings", "Profiles", "Logs", "Overrides", "Tun", "Providers", "Overview"}) {
+                panel.openPage(page); QVERIFY(status->text().isEmpty()); QVERIFY(messages->isHidden());
+            }
+            panel.openPage("Providers");
+            QPushButton *update = nullptr;
+            for (auto *button : panel.findChildren<QPushButton *>()) if (button->text() == "更新资源") update = button;
+            QVERIFY(update); QTest::mouseClick(update, Qt::LeftButton); QTRY_COMPARE(actions, 1);
+            panel.openPage("Tools"); QVERIFY(!status->text().contains("正在更新资源"));
+            QVERIFY(status->text().isEmpty()); QVERIFY(messages->isHidden());
+            QPushButton *clearCache = nullptr;
+            for (auto *button : panel.findChildren<QPushButton *>()) if (button->text() == "清除 dns 缓存") clearCache = button;
+            QVERIFY(clearCache); QTest::mouseClick(clearCache, Qt::LeftButton); QTRY_COMPARE(cacheActions, 1);
+            QTRY_VERIFY(status->text().contains("缓存已清除"));
+            QVERIFY(messages->isVisible());
+            QVERIFY(!messages->autoFillBackground()); QVERIFY(!messages->viewport()->autoFillBackground()); QVERIFY(!status->autoFillBackground());
+            QTest::qWait(600); QVERIFY(status->text().contains("缓存已清除"));
+            panel.openPage("Providers"); QVERIFY(status->text().contains("操作完成"));
+            QTest::mouseClick(update, Qt::LeftButton); QTRY_COMPARE(actions, 2); QTRY_VERIFY(status->text().contains("操作完成"));
+            panel.openPage("Tools"); QVERIFY(status->text().contains("缓存已清除"));
+            panel.openPage("Settings"); QVERIFY(!status->text().contains("缓存已清除")); QVERIFY(!status->text().contains("操作完成"));
+            QVERIFY(status->text().isEmpty()); QVERIFY(messages->isHidden());
+            panel.openPage("Providers"); QVERIFY(status->text().contains("操作完成"));
+            failAction = true; QTest::mouseClick(update, Qt::LeftButton); QTRY_COMPARE(actions, 3);
+            panel.openPage("Tools"); QTest::qWait(600); QVERIFY(status->text().contains("缓存已清除"));
+            panel.openPage("Providers"); QVERIFY(status->text().contains("resource action failed"));
+            QCOMPARE(status->palette().color(QPalette::WindowText), QColor("#d9534f"));
+            panel.openPage("Tools"); QVERIFY(status->text().contains("缓存已清除"));
+            QVERIFY(status->palette().color(QPalette::WindowText) != QColor("#d9534f"));
+            panel.hide();
+        }
+        if (previous.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", previous);
+    }
+    void nativeSecondaryPagesNavigateWithoutTabs()
+    {
+        QTemporaryDir dir; const auto previous = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        TestFrame frame; frame.host.resize(980, 650); frame.host.show();
+        ProxyPlugin plugin; plugin.setFrameProxy(&frame); plugin.active();
+        auto *list = plugin.moduleWidget()->findChild<QAbstractItemView *>("proxy-secondary-pages"); QVERIFY(list);
+        auto *panel = qobject_cast<Panel *>(frame.page.data()); QVERIFY(panel);
+        auto *tabs = panel->findChild<QTabWidget *>(); QVERIFY(tabs); QVERIFY(tabs->tabBar()->isHidden());
+        QCOMPARE(list->model()->rowCount(), 11); QCOMPARE(frame.stack.size(), 2); QCOMPARE(frame.pushes, 2);
+        for (int row = 0; row < list->model()->rowCount(); ++row) QVERIFY(list->model()->index(row, 0).data(Qt::ToolTipRole).toString().isEmpty());
+        QCOMPARE(list->iconSize(), QSize(32, 32));
+        QTRY_COMPARE(list->viewport()->geometry().topLeft(), QPoint(10, 10));
+        for (const auto &page : {QString("Tools"), QString("Settings"), QString("Tun"), QString("Overview")}) {
+            QCOMPARE(plugin.load(page), 0); QCOMPARE(frame.page.data(), static_cast<QWidget *>(panel));
+            QCOMPARE(list->currentIndex().data(Qt::UserRole).toString(), page);
+            QTRY_VERIFY(list->viewport()->rect().intersects(list->visualRect(list->currentIndex())));
+        }
+        const auto tools = list->model()->index(8, 0); list->scrollTo(tools); QTest::qWait(30);
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, list->visualRect(tools).center());
+        QCOMPARE(tabs->currentIndex(), 8); QCOMPARE(frame.pushes, 2);
+        QPointer<Panel> retired = panel; frame.popWidget(&plugin); QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QVERIFY(retired.isNull()); plugin.load("Tun"); QCOMPARE(frame.stack.size(), 2); QVERIFY(frame.page);
+        frame.popWidget(&plugin); frame.popWidget(&plugin); QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        plugin.load("Settings"); QCOMPARE(frame.stack.size(), 2);
+        QVERIFY(!QFile::exists(dir.path() + "/service.sock"));
+        if (previous.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", previous);
     }
     void panelSwitchReadsBackAndPreservesFailure()
     {
@@ -1124,7 +1522,8 @@ private slots:
             QTRY_VERIFY(policyNodes(panel, "组 /日本")); auto *nodes = policyNodes(panel, "组 /日本");
             QVERIFY(nodes);
             QTRY_COMPARE(nodes->count(), 2);
-            QTRY_VERIFY(panel.findChild<QLabel *>("proxy-status")->text().contains("已连接"));
+            QTRY_VERIFY(panel.findChild<QLabel *>("overview-core")->text().contains("内核已连接"));
+            QVERIFY(panel.findChild<QLabel *>("proxy-status")->text().isEmpty());
             QVERIFY(!nodes->item(0)->icon().pixmap(28, 21).isNull());
             QCOMPARE(nodes->viewMode(), QListView::IconMode);
             QTRY_COMPARE(nodes->visualItemRect(nodes->item(0)).top(), nodes->visualItemRect(nodes->item(1)).top());
