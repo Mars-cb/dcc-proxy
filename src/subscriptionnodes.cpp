@@ -66,7 +66,7 @@ SubscriptionNodes subscriptionNodes(const QByteArray &yaml)
     SubscriptionNodes result;
     QStringList nodes, groups;
     QMap<QString, QStringList> providers;
-    const QMap<QString, QString> types{{"ss", "Shadowsocks"}, {"ssr", "ShadowsocksR"}, {"vmess", "Vmess"}, {"vless", "VLESS"}, {"trojan", "Trojan"}, {"hysteria2", "Hysteria2"}, {"hysteria", "Hysteria"}, {"tuic", "Tuic"}, {"http", "Http"}, {"socks5", "Socks5"}, {"wireguard", "WireGuard"}};
+    const QMap<QString, QString> types{{"ss", "Shadowsocks"}, {"ssr", "ShadowsocksR"}, {"vmess", "Vmess"}, {"vless", "VLESS"}, {"trojan", "Trojan"}, {"anytls", "AnyTLS"}, {"hysteria2", "Hysteria2"}, {"hysteria", "Hysteria"}, {"tuic", "Tuic"}, {"http", "Http"}, {"socks5", "Socks5"}, {"wireguard", "WireGuard"}};
     auto text = [](const YAML::Node &node) { return node && node.IsScalar() ? QString::fromStdString(node.as<std::string>()) : QString(); };
     auto add = [&](const YAML::Node &proxy) {
         const auto name = text(proxy["name"]); if (name.isEmpty()) return QString();

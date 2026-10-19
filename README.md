@@ -15,14 +15,14 @@ UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模�
 ```sh
 cd /data/work/dcc-proxy
 dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../dcc-proxy_0.1.8_$(dpkg --print-architecture).deb
+sudo dpkg -i ../dcc-proxy_0.1.9_$(dpkg --print-architecture).deb
 ```
 
 也可继续使用 CPack 脚本（产物位于 `dist/`）：
 
 ```sh
 ./tools/build-deb.sh
-sudo dpkg -i dist/dcc-proxy_0.1.8_$(dpkg --print-architecture).deb
+sudo dpkg -i dist/dcc-proxy_0.1.9_$(dpkg --print-architecture).deb
 ```
 
 两种方式共用 `tools/prepare-core.sh` 和 `tools/prepare-geodata.py`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；
@@ -72,7 +72,7 @@ Provider 节点使用对应健康检查接口。定时刷新只更新变化的�
 
 URL 下载参考 Clash Party 的 User-Agent，支持重定向、订阅流量信息和更新周期。
 “订阅设置”可设置 User-Agent、Authorization、超时、更新周期和本地代理下载。
-支持完整 YAML，以及原始或 Base64 编码的 Hysteria2、Trojan、VLESS、Shadowsocks、TUIC URI 列表。
+支持完整 YAML，以及原始或 Base64 编码的 Hysteria2、AnyTLS、Trojan、VLESS、Shadowsocks、TUIC URI 列表。
 其他分享格式建议由订阅服务输出 Clash / Mihomo YAML。
 
 “设置 → 代理绕过”支持逐行填写域名、`*.example.com`、IPv4/IPv6 地址和 CIDR 网段。

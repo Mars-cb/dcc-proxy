@@ -135,6 +135,13 @@ QByteArray normalizeSubscription(const QByteArray &data)
             if (!q("obfs-password").isEmpty()) p["obfs-password"] = q("obfs-password").toStdString();
             if (!q("upmbps").isEmpty()) p["up"] = q("upmbps").toStdString();
             if (!q("downmbps").isEmpty()) p["down"] = q("downmbps").toStdString();
+        } else if (scheme == "anytls") {
+            p["type"] = "anytls";
+            auto password = url.userName(QUrl::FullyDecoded);
+            if (!url.password().isEmpty()) password += ':' + url.password(QUrl::FullyDecoded);
+            p["password"] = password.toStdString();
+            p["udp"] = true;
+            if (!q("fp").isEmpty()) p["client-fingerprint"] = q("fp").toStdString();
         } else if (scheme == "trojan" || scheme == "vless") {
             p["type"] = scheme.toStdString();
             p[scheme == "trojan" ? "password" : "uuid"] = url.userName(QUrl::FullyDecoded).toStdString();

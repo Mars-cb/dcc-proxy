@@ -672,6 +672,45 @@ private slots:
         QCOMPARE(b["proxy-groups"].size(), size_t(2));
         QVERIFY_EXCEPTION_THROWN(normalizeSubscription("<html>not a subscription</html>"), std::runtime_error);
     }
+    void anytlsSubscriptions()
+    {
+        QByteArray mixed;
+        for (int i = 0; i < 8; ++i) mixed += "hy2://sample@example.com:443#HY2-" + QByteArray::number(i) + '\n';
+        mixed += "anytls://pa%3Ass%40word%2F%2B@example.com:8443/?sni=tls.example.net&insecure=1&alpn=h2,http%2F1.1&fp=chrome#%E6%97%A5%E6%9C%AC\n";
+        for (const auto &bytes : {mixed, mixed.toBase64(), mixed.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)}) {
+            QTemporaryDir dir; Store store(dir.path());
+            const auto id = store.saveProfile("Mixed subscription", {}, bytes);
+            const auto yaml = store.profile(id);
+            const auto config = parseConfig(yaml);
+            QCOMPARE(config["proxies"].size(), size_t(9));
+            for (int i = 0; i < 8; ++i) QCOMPARE(config["proxies"][i]["type"].as<std::string>(), std::string("hysteria2"));
+            const auto node = config["proxies"][8];
+            QCOMPARE(node["type"].as<std::string>(), std::string("anytls"));
+            QCOMPARE(node["server"].as<std::string>(), std::string("example.com"));
+            QCOMPARE(node["port"].as<int>(), 8443);
+            QCOMPARE(node["password"].as<std::string>(), std::string("pa:ss@word/+"));
+            QCOMPARE(node["name"].as<std::string>(), std::string("日本"));
+            QCOMPARE(node["sni"].as<std::string>(), std::string("tls.example.net"));
+            QCOMPARE(node["client-fingerprint"].as<std::string>(), std::string("chrome"));
+            QVERIFY(node["skip-cert-verify"].as<bool>()); QVERIFY(node["udp"].as<bool>());
+            QCOMPARE(node["alpn"][0].as<std::string>(), std::string("h2"));
+            QCOMPARE(node["alpn"][1].as<std::string>(), std::string("http/1.1"));
+            QCOMPARE(config["proxy-groups"][1]["proxies"].size(), size_t(9));
+            QCOMPARE(subscriptionNodes(yaml).proxies["日本"].toObject()["type"].toString(), QString("AnyTLS"));
+            QVERIFY(!subscriptionNodes(yaml).proxies["日本"].toObject().contains("password"));
+            if (!testCore().isEmpty()) {
+                const auto path = dir.path() + "/imported.yaml"; writeFile(path, yaml);
+                QProcess validator; validator.start(testCore(), {"-t", "-d", dir.path(), "-f", path});
+                QVERIFY(validator.waitForFinished(10000));
+                QCOMPARE(validator.exitStatus(), QProcess::NormalExit); QCOMPARE(validator.exitCode(), 0);
+            }
+        }
+        const auto defaults = parseConfig(normalizeSubscription("anytls://sample@[2001:db8::1]/?insecure=0#IPv6"))["proxies"][0];
+        QCOMPARE(defaults["server"].as<std::string>(), std::string("2001:db8::1"));
+        QCOMPARE(defaults["port"].as<int>(), 443);
+        QCOMPARE(defaults["password"].as<std::string>(), std::string("sample"));
+        QVERIFY(!defaults["skip-cert-verify"]); QVERIFY(!defaults["sni"]);
+    }
     void groupRoutesAndWebsiteRules()
     {
         const QJsonObject proxies{{"GLOBAL", QJsonObject{{"all", QJsonArray{"AI", "主选择", "隐藏"}}, {"hidden", true}}},

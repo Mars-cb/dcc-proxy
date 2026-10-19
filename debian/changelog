@@ -1,3 +1,11 @@
+dcc-proxy (0.1.9) unstable; urgency=medium
+
+  * Import AnyTLS share links from plain and Base64 URI subscriptions.
+  * Preserve AnyTLS credentials and TLS settings and label preview nodes.
+  * Cover mixed Hysteria2/AnyTLS imports with real-core config validation.
+
+ -- DCC Proxy maintainers <Mars-cb@users.noreply.github.com>  Mon, 19 Oct 2026 10:00:00 +0800
+
 dcc-proxy (0.1.8) unstable; urgency=medium
 
   * Run the bundled Mihomo core as root by default on install and upgrade.
