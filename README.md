@@ -27,6 +27,18 @@ sudo dpkg -i dist/dcc-proxy_0.1.11_$(dpkg --print-architecture).deb
 
 两种方式共用 `tools/prepare-core.sh` 和 `tools/prepare-geodata.py`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；
 缓存缺失时从官方 HTTPS 地址下载。断网构建前需准备相同缓存。
+GeoIP 等数据下载默认使用 300 秒连接/读取超时，每个文件最多尝试 3 次，失败后清理临时文件；
+数据缓存校验失败时自动重新下载，已通过校验的缓存直接复用。网络较慢时可调整打包参数：
+
+```sh
+DCC_PROXY_GEODATA_TIMEOUT=600 DCC_PROXY_GEODATA_ATTEMPTS=5 dpkg-buildpackage -us -uc -b
+```
+
+无法直连官方地址时，可设置 `https_proxy` 或 `HTTPS_PROXY` 指向可用的 HTTP 代理。
+也可在可联网机器运行 `./tools/prepare-geodata.py`，将 `cores/geodata/` 复制到构建机器，
+再运行 `./tools/prepare-geodata.py --offline` 校验。手动准备时，文件来源、保存名称、大小和
+SHA-256 必须与 `packaging/geodata.json` 一致。
+
 需要使用现有内核时，标准打包可设置 `DCC_PROXY_BUNDLE_CORE=0`；CPack 使用 `--without-core`。
 内核和数据下载仅发生于构建缓存缺失时；deb 安装和首次启动不执行依赖下载。
 默认最多使用 2 个编译任务，`DCC_PROXY_JOBS` 可调整。
@@ -71,8 +83,11 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 Provider 节点使用对应健康检查接口。定时刷新只更新变化的数据，保留卡片、选中项和滚动位置。
 可调超时范围为 1–30000 ms，适配随包 Mihomo 的超时参数范围。
 
-URL 下载参考 Clash Party 的 User-Agent，支持重定向、订阅流量信息和更新周期。
+URL 下载支持重定向、订阅流量信息和更新周期。
 “订阅设置”可设置 User-Agent、Authorization、超时、更新周期和本地代理下载。
+直连下载失败时，依次尝试本插件内核代理和当前系统代理（包括 Deepin 桌面手动代理），
+首次导入也可使用其他代理客户端已启用的系统代理；设置 `proxyFallback: false` 可禁用自动代理回退。
+下载失败会分别显示直连、本地代理和系统代理的失败原因，保留转换服务的有效错误信息并隐藏订阅地址。
 支持完整 YAML、仅含 proxies 的 YAML，以及原始或 Base64 编码的 VMess、SSR、Hysteria2、AnyTLS、Trojan、VLESS、Shadowsocks、TUIC URI 列表。
 支持常用 WS/gRPC/H2/HTTP 传输和旧版 SS 编码；无法映射的传输会明确拒绝。其它格式请提供 Mihomo YAML。
 工具页可连接已有 Sub-Store 服务，列出、编辑订阅/组合并导入 ClashMeta 转换结果；不安装或启动 Sub-Store。
@@ -118,7 +133,9 @@ Linux 的通配符与 Clash Party 一致，只支持开头的 `*.`，不支持 `
 失败恢复原配置；专用端口设置最后应用，避免被订阅或脚本覆写回旧值。
 本机端口检查和控制器连接明确使用直连，不经当前桌面代理。
 订阅下载与核心资源下载默认使用中性的 `Mozilla/5.0`，不附加 Clash Party / Verge 标识；
-显式填写的 User-Agent 保留。应用转发流量保留原有请求头，不添加软件名称。
+未填写 User-Agent 且订阅返回 HTTP 403 时，以 `clash-verge/v2.4.2` 兼容请求头重试一次；
+成功后为该订阅保存此 User-Agent，供手动和自动更新使用。显式填写的 User-Agent 保留，不自动替换。
+应用转发流量保留原有请求头，不添加软件名称。
 
 长提示在有限高度内换行和滚动，保留完整内容工具提示。API 密钥使用控制中心现有
 Dtk 密码框的小眼睛按钮，默认隐藏，关闭页面后重新隐藏。

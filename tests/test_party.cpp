@@ -44,7 +44,26 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QUrlQuery>
+#include <QProcessEnvironment>
 using namespace Party;
+class TestProxyEnvironment {
+public:
+    explicit TestProxyEnvironment(const QByteArray &proxy) : previous(QProcessEnvironment::systemEnvironment())
+    {
+        for (const auto &key : keys) qunsetenv(key.constData());
+        qputenv("http_proxy", proxy); qputenv("https_proxy", proxy); qputenv("no_proxy", "");
+    }
+    ~TestProxyEnvironment()
+    {
+        for (const auto &key : keys) {
+            if (previous.contains(QString::fromLatin1(key))) qputenv(key.constData(), previous.value(QString::fromLatin1(key)).toLocal8Bit());
+            else qunsetenv(key.constData());
+        }
+    }
+private:
+    const QList<QByteArray> keys{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"};
+    QProcessEnvironment previous;
+};
 static QString testCore()
 {
     const auto bundled = QStringLiteral(PARTY_TEST_CORE);
@@ -734,6 +753,43 @@ private slots:
         QCOMPARE(defaults["password"].as<std::string>(), std::string("sample"));
         QVERIFY(!defaults["skip-cert-verify"]); QVERIFY(!defaults["sni"]);
     }
+    void anytlsSubscriptionUriVariants()
+    {
+        const QByteArray uri = "anytls://let%3Ame%40in%2F@example.com/?sni=tls.example&insecure=1&alpn=h2%2Chttp%2F1.1&fp=chrome#Any%20TLS\n"
+                               "anytls://secret@[2001:db8::1]:8443/?insecure=0#IPv6\n"
+                               "hysteria2://fixture@example.net:443#HY2\n";
+        for (const auto &data : {uri, uri.toBase64()}) {
+            const auto normalized = normalizeSubscription(data);
+            const auto config = parseConfig(normalized);
+            QCOMPARE(config["proxies"].size(), size_t(3));
+            const auto node = config["proxies"][0];
+            QCOMPARE(node["type"].as<std::string>(), std::string("anytls"));
+            QCOMPARE(node["name"].as<std::string>(), std::string("Any TLS"));
+            QCOMPARE(node["server"].as<std::string>(), std::string("example.com"));
+            QCOMPARE(node["port"].as<int>(), 443);
+            QCOMPARE(node["password"].as<std::string>(), std::string("let:me@in/"));
+            QCOMPARE(node["sni"].as<std::string>(), std::string("tls.example"));
+            QCOMPARE(node["client-fingerprint"].as<std::string>(), std::string("chrome"));
+            QCOMPARE(node["alpn"][0].as<std::string>(), std::string("h2"));
+            QCOMPARE(node["alpn"][1].as<std::string>(), std::string("http/1.1"));
+            QVERIFY(node["skip-cert-verify"].as<bool>()); QVERIFY(node["udp"].as<bool>());
+            QCOMPARE(config["proxies"][1]["server"].as<std::string>(), std::string("2001:db8::1"));
+            QCOMPARE(config["proxies"][1]["port"].as<int>(), 8443);
+            QVERIFY(!config["proxies"][1]["skip-cert-verify"]);
+            QCOMPARE(config["proxies"][2]["type"].as<std::string>(), std::string("hysteria2"));
+            QTemporaryDir dir; Store store(dir.path());
+            const auto id = store.saveProfile("Mixed URI fixture", {}, data);
+            QCOMPARE(parseConfig(store.profile(id))["proxies"].size(), size_t(3));
+        }
+        if (!testCore().isEmpty()) {
+            QTemporaryDir dir;
+            const auto path = dir.path() + "/anytls.yaml";
+            writeFile(path, normalizeSubscription(uri));
+            QProcess validator; validator.start(testCore(), {"-t", "-d", dir.path(), "-f", path});
+            QVERIFY(validator.waitForFinished(10000));
+            QVERIFY2(validator.exitCode() == 0, validator.readAllStandardOutput().constData());
+        }
+    }
     void groupRoutesAndWebsiteRules()
     {
         const QJsonObject proxies{{"GLOBAL", QJsonObject{{"all", QJsonArray{"AI", "主选择", "隐藏"}}, {"hidden", true}}},
@@ -870,8 +926,275 @@ private slots:
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
     }
+    void subscriptionClientCompatibility_data()
+    {
+        QTest::addColumn<QString>("userAgent");
+        QTest::addColumn<int>("initialStatus");
+        QTest::addColumn<int>("compatibleStatus");
+        QTest::addColumn<bool>("useProxy");
+        QTest::addColumn<bool>("proxyFallback");
+        QTest::addColumn<bool>("redirect");
+        QTest::addColumn<int>("expectedRequests");
+        QTest::addColumn<bool>("success");
+        QTest::newRow("neutral-success") << QString() << 200 << 200 << false << false << false << 1 << true;
+        QTest::newRow("403-compatible-success") << QString() << 403 << 200 << false << false << false << 2 << true;
+        QTest::newRow("custom-agent-preserved") << QString("CustomClient/1.0") << 403 << 200 << false << false << false << 1 << false;
+        QTest::newRow("401-no-agent-retry") << QString() << 401 << 200 << false << false << false << 1 << false;
+        QTest::newRow("403-retry-bounded") << QString() << 403 << 403 << false << false << false << 2 << false;
+        QTest::newRow("redirect-keeps-compatible-agent") << QString() << 403 << 200 << false << false << true << 4 << true;
+        QTest::newRow("proxy-keeps-compatible-agent") << QString() << 403 << 200 << true << false << false << 2 << true;
+        QTest::newRow("proxy-fallback-after-agent-retry") << QString() << 403 << 403 << false << true << false << 3 << true;
+    }
+    void subscriptionClientCompatibility()
+    {
+        QFETCH(QString, userAgent); QFETCH(int, initialStatus); QFETCH(int, compatibleStatus);
+        QFETCH(bool, useProxy); QFETCH(bool, proxyFallback); QFETCH(bool, redirect);
+        QFETCH(int, expectedRequests); QFETCH(bool, success);
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        QList<QByteArray> requests;
+        const QByteArray subscription = "proxies: [{name: fixture, type: direct}]\n";
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create();
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    *buffer += socket->readAll();
+                    if (!buffer->contains("\r\n\r\n")) return;
+                    requests.append(*buffer);
+                    const auto target = buffer->split(' ').value(1);
+                    const bool proxied = target.startsWith("http://");
+                    const bool compatible = buffer->contains("User-Agent: clash-verge/v2.4.2\r\n");
+                    const int status = redirect && target == "/subscription" ? 302 :
+                        (proxied && proxyFallback ? 200 : (compatible ? compatibleStatus : initialStatus));
+                    const auto body = status == 200 ? subscription : QByteArray("Forbidden");
+                    socket->write("HTTP/1.1 " + QByteArray::number(status) + " Fixture\r\nContent-Length: " + QByteArray::number(body.size()) +
+                                  "\r\nLocation: /redirected\r\nSubscription-Userinfo: upload=1; total=1024\r\n"
+                                  "Profile-Update-Interval: 12\r\nConnection: close\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        const QUrl url(QString("http://127.0.0.1:%1/subscription").arg(server.serverPort()));
+        const QJsonObject options{{"userAgent", userAgent}, {"authToken", "Bearer fixture"}, {"useProxy", useProxy}, {"proxyFallback", proxyFallback}};
+        int callbacks = 0; QByteArray bytes; QJsonObject metadata; QString error;
+        QObject context;
+        fetchSubscription(url, options, useProxy || proxyFallback ? server.serverPort() : 0, &context,
+            [&](const QByteArray &data, const QJsonObject &info, const QString &failure) {
+                ++callbacks; bytes = data; metadata = info; error = failure;
+            });
+        QTRY_COMPARE(callbacks, 1);
+        QCOMPARE(requests.size(), expectedRequests);
+        QVERIFY(requests.first().contains("User-Agent: " + (userAgent.isEmpty() ? QByteArray("Mozilla/5.0") : userAgent.toUtf8()) + "\r\n"));
+        for (const auto &request : requests) QVERIFY(request.contains("Authorization: Bearer fixture\r\n"));
+        if (success) {
+            QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(bytes, subscription);
+            QCOMPARE(metadata["suggestedUpdateMinutes"].toInt(), 720);
+            QCOMPARE(metadata["usage"].toObject()["total"].toString(), QString("1024"));
+            if (initialStatus == 403) {
+                QCOMPARE(metadata["userAgent"].toString(), QString("clash-verge/v2.4.2"));
+                QVERIFY(requests.last().contains("User-Agent: clash-verge/v2.4.2\r\n"));
+            } else QVERIFY(!metadata.contains("userAgent"));
+        } else {
+            QVERIFY(!error.isEmpty()); QVERIFY(bytes.isEmpty()); QVERIFY(metadata.isEmpty());
+            QVERIFY(error.contains(QString::number(initialStatus)));
+        }
+    }
+    void subscriptionSystemProxyFallback_data()
+    {
+        QTest::addColumn<bool>("localProxy");
+        QTest::addColumn<bool>("useProxy");
+        QTest::addColumn<bool>("fallback");
+        QTest::addColumn<int>("systemStatus");
+        QTest::addColumn<bool>("compatibleAgent");
+        QTest::addColumn<int>("directRequests");
+        QTest::addColumn<int>("localRequests");
+        QTest::addColumn<int>("systemRequests");
+        QTest::addColumn<bool>("bypass");
+        QTest::newRow("first-import-system-fallback") << false << false << true << 200 << false << 1 << 0 << 1 << false;
+        QTest::newRow("unavailable-local-then-system") << true << false << true << 200 << false << 1 << 1 << 1 << false;
+        QTest::newRow("fallback-disabled") << false << false << false << 200 << false << 1 << 0 << 0 << false;
+        QTest::newRow("explicit-proxy-first-import") << false << true << false << 200 << false << 0 << 0 << 1 << false;
+        QTest::newRow("failed-system-no-loop") << false << false << true << 503 << false << 1 << 0 << 1 << false;
+        QTest::newRow("system-403-agent-retry") << false << false << true << 200 << true << 1 << 0 << 2 << false;
+        QTest::newRow("system-proxy-bypass-respected") << false << false << true << 200 << false << 1 << 0 << 0 << true;
+    }
+    void subscriptionSystemProxyFallback()
+    {
+        QFETCH(bool, localProxy); QFETCH(bool, useProxy); QFETCH(bool, fallback); QFETCH(int, systemStatus);
+        QFETCH(bool, compatibleAgent); QFETCH(int, directRequests); QFETCH(int, localRequests); QFETCH(int, systemRequests);
+        QFETCH(bool, bypass);
+        QTcpServer origin, local, system;
+        QVERIFY(origin.listen(QHostAddress::LocalHost)); QVERIFY(local.listen(QHostAddress::LocalHost)); QVERIFY(system.listen(QHostAddress::LocalHost));
+        const QByteArray proxyUrl = "http://127.0.0.1:" + QByteArray::number(system.serverPort());
+        TestProxyEnvironment environment(proxyUrl);
+        if (bypass) qputenv("no_proxy", "127.0.0.1");
+        int directSeen = 0, localSeen = 0; QList<QByteArray> systemSeen;
+        auto closeRequests = [&](QTcpServer &server, int &count) {
+            const bool isLocalProxy = &server == &local;
+            connect(&server, &QTcpServer::newConnection, this, [&server, &count, isLocalProxy] {
+                while (auto *socket = server.nextPendingConnection()) {
+                    auto buffer = QSharedPointer<QByteArray>::create();
+                    connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                    connect(socket, &QTcpSocket::readyRead, socket, [socket, buffer, &count, isLocalProxy] {
+                        *buffer += socket->readAll();
+                        if (!buffer->contains("\r\n\r\n")) return;
+                        ++count;
+                        if (isLocalProxy) socket->write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        socket->disconnectFromHost();
+                    });
+                }
+            });
+        };
+        closeRequests(origin, directSeen); closeRequests(local, localSeen);
+        const QByteArray subscription = "proxies: [{name: fixture, type: direct}]\n";
+        connect(&system, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = system.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create();
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    *buffer += socket->readAll();
+                    if (!buffer->contains("\r\n\r\n")) return;
+                    systemSeen.append(*buffer);
+                    const int status = compatibleAgent && !buffer->contains("User-Agent: clash-verge/v2.4.2\r\n") ? 403 : systemStatus;
+                    const auto body = status == 200 ? subscription : QByteArray("Fixture error");
+                    socket->write("HTTP/1.1 " + QByteArray::number(status) + " Fixture\r\nContent-Length: " + QByteArray::number(body.size()) +
+                                  "\r\nConnection: close\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        const QUrl url(QString("http://127.0.0.1:%1/subscription").arg(origin.serverPort()));
+        const QJsonObject options{{"useProxy", useProxy}, {"proxyFallback", fallback},
+                                 {"userAgent", compatibleAgent ? "" : "FixtureClient/1.0"}, {"authToken", "Bearer fixture"}};
+        QObject context; int callbacks = 0; QString error; QByteArray bytes; QJsonObject metadata;
+        fetchSubscription(url, options, localProxy ? local.serverPort() : 0, &context,
+            [&](const QByteArray &data, const QJsonObject &info, const QString &failure) {
+                ++callbacks; bytes = data; metadata = info; error = failure;
+            });
+        QTRY_COMPARE(callbacks, 1);
+        // Qt may transparently repeat a GET once when the peer closes without a response.
+        QVERIFY(directSeen >= directRequests && directSeen <= directRequests * 2);
+        QVERIFY(localSeen >= localRequests && localSeen <= localRequests * 2);
+        QCOMPARE(systemSeen.size(), systemRequests);
+        for (const auto &request : systemSeen) {
+            QVERIFY(request.startsWith("GET " + url.toEncoded() + " HTTP/1.1\r\n"));
+            QVERIFY(request.contains("Authorization: Bearer fixture\r\n"));
+            if (!compatibleAgent) QVERIFY(request.contains("User-Agent: FixtureClient/1.0\r\n"));
+        }
+        if (systemRequests > 0 && systemStatus == 200) {
+            QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(bytes, subscription);
+            if (compatibleAgent) QCOMPARE(metadata["userAgent"].toString(), QString("clash-verge/v2.4.2"));
+        } else {
+            QVERIFY(!error.isEmpty()); QVERIFY(bytes.isEmpty());
+            if (systemRequests == 0) { QVERIFY(error.contains("未收到 HTTP 响应")); QVERIFY(!error.contains("HTTP 0")); }
+        }
+    }
+    void subscriptionDownloadFailureDetails_data()
+    {
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QByteArray>("contentType");
+        QTest::addColumn<QByteArray>("body");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("converter-error") << 400 << QByteArray("text/plain; charset=utf-8")
+            << QByteArray("The following link doesn't contain any valid node info: https://example.invalid/fixture-secret") << QString("有效节点");
+        QTest::newRow("json-message") << 401 << QByteArray("application/json")
+            << QByteArray("{\"message\":\"Invalid subscription https://example.invalid/fixture-secret\"}") << QString("Invalid subscription");
+        QTest::newRow("proxy-refused") << 403 << QByteArray("text/html")
+            << QStringLiteral("<html><h1>403</h1><p>请您关闭代理软件后再访问本网站</p></html>").toUtf8() << QString("关闭代理");
+        QTest::newRow("html-not-displayed") << 404 << QByteArray("text/html")
+            << QByteArray("<html><script>fixture-secret</script>Not found</html>") << QString("Fixture failure");
+        QTest::newRow("bounded-error") << 400 << QByteArray("text/plain")
+            << QByteArray(12000, 'x') << QString("xxx");
+    }
+    void subscriptionDownloadFailureDetails()
+    {
+        QFETCH(int, status); QFETCH(QByteArray, contentType); QFETCH(QByteArray, body); QFETCH(QString, expected);
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create();
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    *buffer += socket->readAll(); if (!buffer->contains("\r\n\r\n")) return;
+                    socket->write("HTTP/1.1 " + QByteArray::number(status) + " Fixture failure\r\nContent-Type: " + contentType +
+                                  "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        QObject context; int callbacks = 0; QString error;
+        fetchSubscription(QUrl(QString("http://127.0.0.1:%1/fixture-secret").arg(server.serverPort())),
+            {{"userAgent", "FixtureClient/1.0"}, {"proxyFallback", false}}, 0, &context,
+            [&](const QByteArray &bytes, const QJsonObject &metadata, const QString &failure) {
+                ++callbacks; error = failure; QVERIFY(bytes.isEmpty()); QVERIFY(metadata.isEmpty());
+            });
+        QTRY_COMPARE(callbacks, 1);
+        QVERIFY(error.contains("直连")); QVERIFY(error.contains("HTTP " + QString::number(status)));
+        QVERIFY2(error.contains(expected), qPrintable(error));
+        QVERIFY(!error.contains("fixture-secret")); QVERIFY(!error.contains("<html>"));
+        QVERIFY(error.size() < 700);
+    }
+    void subscriptionInterruptedBodyIsNotAnErrorDetail()
+    {
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create();
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [socket, buffer] {
+                    *buffer += socket->readAll(); if (!buffer->contains("\r\n\r\n")) return;
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npassword: fixture-secret\n");
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        QObject context; int callbacks = 0; QString error;
+        fetchSubscription(QUrl(QString("http://127.0.0.1:%1/fixture-secret").arg(server.serverPort())),
+            {{"proxyFallback", false}}, 0, &context,
+            [&](const QByteArray &bytes, const QJsonObject &, const QString &failure) {
+                ++callbacks; error = failure; QVERIFY(bytes.isEmpty());
+            });
+        QTRY_COMPARE(callbacks, 1); QVERIFY(!error.isEmpty());
+        QVERIFY(!error.contains("fixture-secret")); QVERIFY(!error.contains("password:"));
+    }
+    void subscriptionFallbackPreservesFirstFailure()
+    {
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost)); int requests = 0;
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create();
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    *buffer += socket->readAll(); if (!buffer->contains("\r\n\r\n")) return; ++requests;
+                    const bool proxy = buffer->startsWith("GET http://");
+                    const auto body = proxy ? QStringLiteral("<html>请您关闭代理软件后再访问本网站</html>").toUtf8() :
+                        QByteArray("The following link doesn't contain any valid node info: https://example.invalid/fixture-secret");
+                    socket->write(QByteArray("HTTP/1.1 ") + (proxy ? "403 Forbidden" : "400 Bad Request") +
+                                  "\r\nContent-Type: text/html\r\nContent-Length: " + QByteArray::number(body.size()) +
+                                  "\r\nConnection: close\r\n\r\n" + body);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        TestProxyEnvironment environment("http://127.0.0.1:" + QByteArray::number(server.serverPort()));
+        QObject context; int callbacks = 0; QString error;
+        fetchSubscription(QUrl(QString("http://127.0.0.1:%1/subscription").arg(server.serverPort())),
+            {{"userAgent", "FixtureClient/1.0"}}, server.serverPort(), &context,
+            [&](const QByteArray &, const QJsonObject &, const QString &failure) { ++callbacks; error = failure; });
+        QTRY_COMPARE(callbacks, 1); QCOMPARE(requests, 2);
+        QVERIFY(error.contains("直连（HTTP 400）")); QVERIFY(error.contains("有效节点"));
+        QVERIFY(error.contains("本地代理（HTTP 403）")); QVERIFY(error.contains("关闭代理"));
+        QVERIFY(!error.contains("fixture-secret"));
+    }
+    void subscriptionUrlImport_data()
+    {
+        QTest::addColumn<bool>("rejectNeutralAgent");
+        QTest::newRow("neutral-agent") << false;
+        QTest::newRow("compatible-agent") << true;
+    }
     void subscriptionUrlImport()
     {
+        QFETCH(bool, rejectNeutralAgent);
         QTemporaryDir dir;
         const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR");
         qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
@@ -880,7 +1203,7 @@ private slots:
         auto settings = store.settings();
         settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort());
         store.setSettings(settings);
-        QByteArray subscriptionRequest;
+        QList<QByteArray> subscriptionRequests;
         const QByteArray subscription = QByteArray("hy2://sample@example.com:443#%E6%97%A5%E6%9C%AC").toBase64();
         connect(&server, &QTcpServer::newConnection, this, [&] {
             while (auto *s = server.nextPendingConnection()) {
@@ -890,7 +1213,13 @@ private slots:
                     *buffer += s->readAll();
                     if (!buffer->contains("\r\n\r\n")) return;
                     const bool isSubscription = buffer->startsWith("GET /subscription ");
-                    if (isSubscription) subscriptionRequest = *buffer;
+                    if (isSubscription) {
+                        subscriptionRequests.append(*buffer);
+                        if (rejectNeutralAgent && buffer->contains("User-Agent: Mozilla/5.0\r\n")) {
+                            s->write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            s->disconnectFromHost(); return;
+                        }
+                    }
                     const auto bytes = isSubscription ? subscription : QByteArray("{}");
                     s->write("HTTP/1.1 200 OK\r\nContent-Length: " + QByteArray::number(bytes.size()) +
                              "\r\nSubscription-Userinfo: upload=1; download=2; total=1024; expire=2000000000\r\n"
@@ -913,7 +1242,12 @@ private slots:
             QCOMPARE(profile["url"].toString(), source);
             QCOMPARE(profiles->item(0, 1)->text(), source);
             QCOMPARE(parseConfig(store.profile(profile["id"].toString()))["proxies"].size(), size_t(1));
-            QVERIFY(subscriptionRequest.contains("User-Agent: Mozilla/5.0"));
+            QCOMPARE(subscriptionRequests.size(), rejectNeutralAgent ? 2 : 1);
+            QVERIFY(subscriptionRequests.first().contains("User-Agent: Mozilla/5.0\r\n"));
+            if (rejectNeutralAgent) {
+                QVERIFY(subscriptionRequests.last().contains("User-Agent: clash-verge/v2.4.2\r\n"));
+                QCOMPARE(profile["userAgent"].toString(), QString("clash-verge/v2.4.2"));
+            } else QVERIFY(!profile.contains("userAgent"));
             QCOMPARE(profile["suggestedUpdateMinutes"].toInt(), 720);
             panel.openPage("Proxies");
             auto *nodes = policyNodes(panel, "__dcc_subscription_nodes__"); QVERIFY(nodes); QTRY_COMPARE(nodes->count(), 1);
