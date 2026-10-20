@@ -1,6 +1,11 @@
 #include "api.h"
 #include "config.h"
 #include <QNetworkProxy>
+#include <QNetworkProxyFactory>
+#include <QNetworkProxyQuery>
+#include <QHostAddress>
+#include <QDBusInterface>
+#include <QDBusMessage>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QTimer>
@@ -187,6 +192,81 @@ void serviceRequest(const QJsonObject &command, QObject *context, Api::Done done
                  action == "apply" || action == "recover-orphan" ? 140000 : 20000);
     socket->connectToServer(socketName());
 }
+static bool usableDownloadProxy(const QNetworkProxy &proxy)
+{
+    return (proxy.type() == QNetworkProxy::HttpProxy || proxy.type() == QNetworkProxy::Socks5Proxy) &&
+        !proxy.hostName().isEmpty() && proxy.port() > 0;
+}
+static QNetworkProxy systemDownloadProxy(const QUrl &url)
+{
+    for (const auto &proxy : QNetworkProxyFactory::systemProxyForQuery(QNetworkProxyQuery(url)))
+        if (usableDownloadProxy(proxy)) return proxy;
+    // An explicit environment proxy may have been bypassed by no_proxy.
+    // In that case, keep Qt's direct decision instead of substituting a desktop proxy.
+    for (const auto &key : {"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"})
+        if (!qgetenv(key).isEmpty()) return QNetworkProxy::NoProxy;
+
+    // Qt builds without libproxy only read environment variables on Linux.
+    // The control center also needs the proxy configured by the Deepin desktop.
+    for (const auto &service : {QString("org.deepin.dde.Network1"), QString("com.deepin.daemon.Network")}) {
+        QDBusInterface network(service, service.startsWith("org.") ? "/org/deepin/dde/Network1" : "/com/deepin/daemon/Network",
+                               service, QDBusConnection::sessionBus());
+        network.setTimeout(1000);
+        if (!network.isValid()) continue;
+        const auto mode = network.call("GetProxyMethod");
+        if (mode.type() == QDBusMessage::ErrorMessage || mode.arguments().value(0).toString() != "manual") break;
+        const auto ignored = network.call("GetProxyIgnoreHosts");
+        if (ignored.type() == QDBusMessage::ErrorMessage) break;
+        const auto host = url.host().toLower();
+        QHostAddress address(host);
+        for (auto entry : ignored.arguments().value(0).toString().split(',', QString::SkipEmptyParts)) {
+            entry = entry.trimmed().toLower();
+            const auto subnet = QHostAddress::parseSubnet(entry);
+            if (entry == "*" || host == entry || (!address.isNull() && address == QHostAddress(entry)) ||
+                (!subnet.first.isNull() && address.isInSubnet(subnet))) return QNetworkProxy::NoProxy;
+            if (entry.startsWith("*.")) entry.remove(0, 1);
+            if (entry.startsWith('.') && host.endsWith(entry)) return QNetworkProxy::NoProxy;
+        }
+        QStringList kinds{url.scheme() == "https" ? "https" : "http", "http", "socks"};
+        kinds.removeDuplicates();
+        for (const auto &kind : kinds) {
+            const auto reply = network.call("GetProxy", kind);
+            if (reply.type() == QDBusMessage::ErrorMessage) continue;
+            const auto args = reply.arguments();
+            const int port = args.value(1).toString().toInt();
+            const auto proxy = QNetworkProxy(kind == "socks" ? QNetworkProxy::Socks5Proxy : QNetworkProxy::HttpProxy,
+                                             args.value(0).toString(), port > 0 && port <= 65535 ? quint16(port) : 0);
+            if (usableDownloadProxy(proxy)) return proxy;
+        }
+        break;
+    }
+    return QNetworkProxy::NoProxy;
+}
+static QString subscriptionFailureDetail(QNetworkReply *reply, int status)
+{
+    const auto body = status >= 400 ? reply->read(4096) : QByteArray();
+    QString detail = !status || (status >= 200 && status < 300) ? reply->errorString() : QString();
+    if (status == 403 && body.contains(QStringLiteral("关闭代理").toUtf8()))
+        detail = QObject::tr("订阅服务拒绝当前代理出口，要求关闭代理后访问。请尝试直连或更换网络。");
+    else if (body.contains("doesn't contain any valid node info") || body.contains("No nodes were found"))
+        detail = QObject::tr("订阅转换服务未能从原始订阅获取有效节点。");
+    else if (status >= 300) {
+        const auto type = reply->header(QNetworkRequest::ContentTypeHeader).toString().section(';', 0, 0).trimmed().toLower();
+        if (type == "text/plain") detail = QString::fromUtf8(body);
+        else if (type == "application/json" || type.endsWith("+json")) {
+            const auto object = QJsonDocument::fromJson(body).object();
+            for (const auto &key : {"message", "error", "detail"})
+                if (object[key].isString()) { detail = object[key].toString(); break; }
+        }
+        if (detail.isEmpty() || detail.contains('<') || detail.contains('>'))
+            detail = reply->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString();
+    }
+    if (detail.isEmpty()) detail = status ? QObject::tr("服务器拒绝请求") : reply->errorString();
+    // Error bodies and Qt's errorString can echo credential-bearing subscription URLs.
+    detail.replace(QRegularExpression("https?://[^\\s<>\"']+", QRegularExpression::CaseInsensitiveOption),
+                   QObject::tr("[订阅地址已隐藏]"));
+    return detail.simplified().left(500);
+}
 void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPort, QObject *context, SubscriptionDone done)
 {
     if (!url.isValid() || !url.userInfo().isEmpty() || (url.scheme() != "http" && url.scheme() != "https")) { done({}, {}, QObject::tr("订阅 URL 无效")); return; }
@@ -194,36 +274,58 @@ void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPor
     if (userAgent.isEmpty()) userAgent = "Mozilla/5.0";
     const QString authorization = options["authToken"].toString();
     if (userAgent.contains('\n') || userAgent.contains('\r') || authorization.contains('\n') || authorization.contains('\r')) { done({}, {}, QObject::tr("订阅请求头无效")); return; }
-    using Attempt = std::function<void(QUrl, bool, int)>;
+    const bool automaticUserAgent = options["userAgent"].toString().isEmpty();
+    enum Route { Direct, LocalProxy, SystemProxy };
+    using Attempt = std::function<void(QUrl, Route, int, bool)>;
     const auto attempt = std::make_shared<Attempt>();
+    const auto failures = std::make_shared<QStringList>();
     const std::weak_ptr<Attempt> weak(attempt);
-    *attempt = [weak, context, done, options, url, userAgent, authorization, proxyPort](QUrl current, bool proxy, int redirects) {
+    *attempt = [weak, failures, context, done, options, url, userAgent, automaticUserAgent, authorization, proxyPort](QUrl current, Route route, int redirects, bool compatibleAgent) {
         auto retained = weak.lock();
         if (!retained) return;
         auto *manager = new QNetworkAccessManager(context);
-        manager->setProxy(proxy ? QNetworkProxy(QNetworkProxy::HttpProxy, "127.0.0.1", quint16(proxyPort)) : QNetworkProxy(QNetworkProxy::NoProxy));
+        const auto localProxy = QNetworkProxy(QNetworkProxy::HttpProxy, "127.0.0.1", quint16(proxyPort));
+        manager->setProxy(route == SystemProxy ? systemDownloadProxy(current) :
+                          (route == LocalProxy ? localProxy : QNetworkProxy(QNetworkProxy::NoProxy)));
         QNetworkRequest request(current);
-        request.setRawHeader("User-Agent", userAgent.toUtf8());
+        // Some subscription endpoints only accept a recognized client identifier.
+        const QByteArray effectiveAgent = compatibleAgent ? QByteArray("clash-verge/v2.4.2") : userAgent.toUtf8();
+        request.setRawHeader("User-Agent", effectiveAgent);
         request.setRawHeader("Accept-Encoding", "identity");
         if (!authorization.isEmpty() && current.host() == url.host()) request.setRawHeader("Authorization", authorization.toUtf8());
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
         auto *reply = manager->get(request);
         QTimer::singleShot(qBound(5, options["timeoutSeconds"].toInt(30), 180) * 1000, reply, &QNetworkReply::abort);
         QObject::connect(reply, &QNetworkReply::readyRead, context, [reply] { if (reply->bytesAvailable() > 8 * 1024 * 1024) reply->abort(); });
-        QObject::connect(reply, &QNetworkReply::finished, context, [manager, reply, retained, done, options, url, current, proxy, redirects, proxyPort] {
+        QObject::connect(reply, &QNetworkReply::finished, context, [manager, reply, retained, failures, done, options, url, current, route, redirects, proxyPort, localProxy, automaticUserAgent, compatibleAgent, effectiveAgent] {
             manager->deleteLater();
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const auto redirected = reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
             if (status >= 300 && status < 400 && !redirected.isEmpty()) {
                 const auto next = current.resolved(redirected);
                 if (redirects >= 5 || (next.scheme() != "http" && next.scheme() != "https") || (current.scheme() == "https" && next.scheme() != "https") || !next.userInfo().isEmpty()) { done({}, {}, QObject::tr("订阅重定向无效或次数过多")); return; }
-                (*retained)(next, proxy, redirects + 1); return;
+                (*retained)(next, route, redirects + 1, compatibleAgent); return;
             }
             if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300) {
-                if (!proxy && proxyPort > 0 && options["proxyFallback"].toBool(true)) { (*retained)(url, true, 0); return; }
-                done({}, {}, QObject::tr("订阅下载失败（HTTP %1）：%2").arg(status).arg(reply->errorString())); return;
+                const auto routeName = route == Direct ? QObject::tr("直连") :
+                    (route == LocalProxy ? QObject::tr("本地代理") : QObject::tr("系统代理"));
+                const auto reason = status ? QObject::tr("%1（HTTP %2）：%3").arg(routeName).arg(status).arg(subscriptionFailureDetail(reply, status)) :
+                    QObject::tr("%1（未收到 HTTP 响应）：%2").arg(routeName, subscriptionFailureDetail(reply, status));
+                if (!failures->contains(reason)) failures->append(reason);
+                if (status == 403 && automaticUserAgent && !compatibleAgent) { (*retained)(url, route, 0, true); return; }
+                if (options["proxyFallback"].toBool(true)) {
+                    if (route == Direct && proxyPort > 0) { (*retained)(url, LocalProxy, 0, compatibleAgent); return; }
+                    if (route != SystemProxy) {
+                        const auto systemProxy = systemDownloadProxy(current);
+                        if (usableDownloadProxy(systemProxy) && (route != LocalProxy || systemProxy != localProxy)) {
+                            (*retained)(url, SystemProxy, 0, compatibleAgent); return;
+                        }
+                    }
+                }
+                done({}, {}, QObject::tr("订阅下载失败：\n%1").arg(failures->join('\n'))); return;
             }
             QJsonObject metadata;
+            if (compatibleAgent) metadata["userAgent"] = QString::fromUtf8(effectiveAgent);
             const auto info = QString::fromLatin1(reply->rawHeader("subscription-userinfo"));
             QJsonObject usage;
             for (const auto &field : info.split(';', QString::SkipEmptyParts)) {
@@ -244,6 +346,6 @@ void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPor
             done(reply->readAll(), metadata, {});
         });
     };
-    (*attempt)(url, options["useProxy"].toBool(false) && proxyPort > 0, 0);
+    (*attempt)(url, options["useProxy"].toBool(false) ? (proxyPort > 0 ? LocalProxy : SystemProxy) : Direct, 0, false);
 }
 }

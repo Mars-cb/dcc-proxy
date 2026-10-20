@@ -251,6 +251,13 @@ unshare --user --map-root-user --net python3 tests/smoke_geodata.py \
 ```
 
 GeoIP 等构建缓存完整时，可以用 `tools/prepare-geodata.py --offline` 只校验不下载。
+构建下载脚本的独立回归无需外网，覆盖读取中途超时、连接/HTTP 失败、截断及校验失败重试、
+失败后的临时文件清理、缓存替换、重试次数上限与离线校验：
+
+```sh
+python3 -m unittest discover -s tests -p 'test_prepare_geodata.py' -v
+```
+
 Qt 回归增加缺失 mixed-port 时的默认监听及显式覆写优先级检查。
 
 
