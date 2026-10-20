@@ -1,3 +1,11 @@
+dcc-proxy (0.1.12) UNRELEASED; urgency=medium
+
+  * Retry subscription downloads through local and system proxies.
+  * Retry HTTP 403 with a compatible default User-Agent.
+  * Retry and verify build-time geodata downloads with configurable timeouts.
+
+ -- 吴博文 <ut000168@uos>  Tue, 20 Oct 2026 10:24:56 +0800
+
 dcc-proxy (0.1.11) unstable; urgency=medium
 
   * Restart both the daemon and Mihomo from the overview service restart button.

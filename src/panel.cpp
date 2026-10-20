@@ -863,7 +863,7 @@ void Panel::editSubscriptionOptions()
     auto *interval = new QSpinBox; interval->setRange(0, 10080); interval->setSuffix(tr(" 分钟")); interval->setSpecialValueText(tr("跟随全局")); interval->setValue(p["updateMinutes"].toInt()); form->addRow(tr("更新周期"), interval);
     auto *timeout = new QSpinBox; timeout->setRange(5, 180); timeout->setSuffix(tr(" 秒")); timeout->setValue(p["timeoutSeconds"].toInt(30)); form->addRow(tr("请求超时"), timeout);
     auto *automatic = new QCheckBox(tr("自动更新")); automatic->setChecked(p["autoUpdate"].toBool(true)); form->addRow(automatic);
-    auto *useProxy = new QCheckBox(tr("通过正在运行的本地代理下载")); useProxy->setChecked(p["useProxy"].toBool()); form->addRow(useProxy);
+    auto *useProxy = new QCheckBox(tr("通过本插件或系统代理下载")); useProxy->setChecked(p["useProxy"].toBool()); form->addRow(useProxy);
     layout->addLayout(form);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel); layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
