@@ -537,7 +537,7 @@ void Panel::renderGroups()
         if (card.header->isChecked()) {
             renderNodeList(card.nodes, name);
             const int columns = qMax(1, card.nodes->viewport()->width() / qMax(1, card.nodes->gridSize().width()));
-            card.nodes->setFixedHeight(qBound(100, ((card.nodes->count() + columns - 1) / columns) * 88 + 8, 360));
+            card.nodes->setFixedHeight(qBound(100, ((card.nodes->count() + columns - 1) / columns) * 88 + 8, 8 * 88 + 8));
         }
     }
 }
@@ -741,42 +741,65 @@ void Panel::testNodes(bool all, const QString &node, const QString &policy)
     if (!m_connected) return;
     const auto policyName = policy.isEmpty() ? m_group->currentData().toString() : policy;
     QString target = m_testUrl->text().trimmed();
-    if (target.isEmpty()) {
-        target = m_proxyData[policyName].toObject()["testUrl"].toString();
-        if (target.isEmpty()) {
-            try {
-                const auto runtime = parseConfig(m_store.runtime(m_store.settings()["active"].toString()));
-                if (runtime["proxy-groups"]) for (const auto &group : runtime["proxy-groups"])
-                    if (group["name"] && group["url"] && QString::fromStdString(group["name"].as<std::string>()) == policyName)
-                        target = QString::fromStdString(group["url"].as<std::string>());
-            } catch (...) { }
-        }
-    }
-    if (target.isEmpty()) target = "https://www.gstatic.com/generate_204";
-    const QUrl testUrl(target);
-    if (testUrl.scheme() != "https" && testUrl.scheme() != "http") { message(tr("请输入 HTTP 或 HTTPS 测试地址"), true); return; }
+    if (!target.isEmpty() && QUrl(target).scheme() != "https" && QUrl(target).scheme() != "http") { message(tr("请输入 HTTP 或 HTTPS 测试地址"), true); return; }
     QStringList names;
     if (all) for (const auto &v : m_proxyData[policyName].toObject()["all"].toArray()) names << v.toString();
     else if (!node.isEmpty()) names << node;
     names.removeDuplicates();
+    for (int i = names.size() - 1; i >= 0; --i) if (m_testing.contains(names[i])) names.removeAt(i);
     if (names.isEmpty()) return;
     if (m_testing.isEmpty()) { ++m_testEpoch; m_testPassed = 0; m_testFailed = 0; m_testPages.clear(); }
     m_testPages.insert(notificationPage());
-    m_testTimeoutMs = m_testTimeout->value();
-    guarded([&] {
-        auto s = m_store.settings(); s["delayTestUrl"] = m_testUrl->text().trimmed();
-        s["delayTestTimeout"] = m_testTimeoutMs; s["delayTestConcurrency"] = m_testConcurrency->value();
-        m_store.setSettings(s);
-    });
-    QUrlQuery query; query.addQueryItem("url", testUrl.toString()); query.addQueryItem("timeout", QString::number(m_testTimeoutMs));
-    m_testQuery = query.toString(QUrl::FullyEncoded);
     for (const auto &name : names) {
-        if (m_testing.contains(name)) continue;
-        m_testing.insert(name); m_testQueue.enqueue({name, m_testQuery, m_nodeProviders.value(name), m_testTimeoutMs}); m_testErrors.remove(name);
+        m_testing.insert(name); m_testErrors.remove(name);
     }
     m_testGroup->setEnabled(false);
     message(tr("正在测速 %1 个节点…").arg(names.size()));
-    renderNodes(); runNodeTests();
+    // Paint the accepted gesture before disk reads, settings writes or network setup.
+    // Update roles in place instead of rebuilding every group on the click path.
+    for (auto *list : findChildren<NodeList *>()) {
+        for (int row = 0; row < list->count(); ++row) {
+            auto *item = list->item(row);
+            if (names.contains(item->data(Qt::UserRole).toString())) {
+                item->setData(NodeTestingRole, true); item->setData(NodeTestErrorRole, QString());
+            }
+        }
+        list->syncAnimation();
+        if (list->isVisible()) list->viewport()->repaint();
+    }
+    const int timeout = m_testTimeout->value(), concurrency = m_testConcurrency->value();
+    const auto epoch = m_testEpoch;
+    QTimer::singleShot(0, this, scopedCallback(std::function<void()>([this, names, target, policyName, timeout, concurrency, epoch]() mutable {
+        if (epoch != m_testEpoch) return;
+        const auto customTarget = target;
+        if (target.isEmpty()) target = m_proxyData[policyName].toObject()["testUrl"].toString();
+        if (target.isEmpty()) {
+            try {
+                // The live snapshot already includes overrides. Do not regenerate it
+                // or execute override scripts just to obtain a health-check URL.
+                if (localController(m_store.settings()["endpoint"].toString())) {
+                    const auto runtime = parseConfig(readFile(m_store.root() + "/work/config.yaml"));
+                    if (runtime["proxy-groups"]) for (const auto &group : runtime["proxy-groups"])
+                        if (group["name"] && group["url"] && QString::fromStdString(group["name"].as<std::string>()) == policyName)
+                            target = QString::fromStdString(group["url"].as<std::string>());
+                }
+            } catch (...) { }
+        }
+        if (target.isEmpty()) target = "https://www.gstatic.com/generate_204";
+        const QUrl testUrl(target);
+        if (testUrl.scheme() != "https" && testUrl.scheme() != "http") {
+            for (const auto &name : names) m_testing.remove(name);
+            renderNodes(); message(tr("请输入 HTTP 或 HTTPS 测试地址"), true); return;
+        }
+        QUrlQuery query; query.addQueryItem("url", testUrl.toString()); query.addQueryItem("timeout", QString::number(timeout));
+        for (const auto &name : names) m_testQueue.enqueue({name, query.toString(QUrl::FullyEncoded), m_nodeProviders.value(name), timeout});
+        runNodeTests();
+        guarded([&] {
+            auto settings = m_store.settings(); const auto previous = settings;
+            settings["delayTestUrl"] = customTarget; settings["delayTestTimeout"] = timeout; settings["delayTestConcurrency"] = concurrency;
+            if (settings != previous) m_store.setSettings(settings);
+        });
+    })));
 }
 void Panel::runNodeTests()
 {

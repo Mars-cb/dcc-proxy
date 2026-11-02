@@ -11,6 +11,7 @@ public:
     explicit NodeList(QWidget *parent = nullptr);
     void syncAnimation();
     QRect delayRect(const QListWidgetItem *item) const;
+    bool delayHovered(const QModelIndex &index) const { return index == m_hoveredDelay; }
 signals:
     void delayClicked(const QString &name);
 protected:
@@ -18,10 +19,14 @@ protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
 private:
+    void updateDelayHover(const QPoint &position);
     QTimer m_animation;
+    QPersistentModelIndex m_hoveredDelay;
     QPersistentModelIndex m_pressedDelay;
     bool m_delayGesture = false;
     bool m_suppressRelease = false;

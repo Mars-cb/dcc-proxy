@@ -44,6 +44,8 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QUrlQuery>
+#include <QPainter>
+#include <QStyleOptionViewItem>
 #include <QProcessEnvironment>
 using namespace Party;
 class TestProxyEnvironment {
@@ -1569,6 +1571,38 @@ private slots:
         QVERIFY(!Api::validEndpoint(QUrl("https://example.com/path")));
         QCOMPARE(Api::segment("组 /?#日本"), QString("%E7%BB%84%20%2F%3F%23%E6%97%A5%E6%9C%AC"));
     }
+    void nodeDelayHoverFeedback()
+    {
+        NodeList list; list.resize(520, 180);
+        auto *item = new QListWidgetItem("node", &list);
+        item->setData(Qt::UserRole, "node"); item->setData(NodeDisplayNameRole, "node");
+        item->setData(NodeTypeRole, "AnyTLS"); list.show(); QTest::qWait(30);
+        const auto index = list.model()->index(0, 0);
+        QSignalSpy tests(&list, &NodeList::delayClicked); int switches = 0;
+        connect(&list, &QListWidget::itemClicked, &list, [&] { ++switches; });
+        auto render = [&] {
+            QImage image(list.viewport()->size(), QImage::Format_ARGB32_Premultiplied); image.fill(Qt::white);
+            QPainter painter(&image); QStyleOptionViewItem option;
+            option.initFrom(&list); option.state = QStyle::State_Enabled; option.rect = list.visualItemRect(item);
+            list.itemDelegate()->paint(&painter, option, index); return image;
+        };
+        for (const int delay : {245, 0, -1}) {
+            item->setData(NodeDelayRole, delay);
+            QTest::mouseMove(list.viewport(), list.visualItemRect(item).topLeft() + QPoint(20, 15));
+            QVERIFY(!list.delayHovered(index)); const auto normal = render();
+            QTest::mouseMove(list.viewport(), list.delayRect(item).center());
+            QTRY_VERIFY(list.delayHovered(index)); const auto hovered = render();
+            QVERIFY(normal.copy(list.delayRect(item)) != hovered.copy(list.delayRect(item)));
+            QCOMPARE(normal.copy(list.visualItemRect(item).adjusted(8, 8, -8, -50)), hovered.copy(list.visualItemRect(item).adjusted(8, 8, -8, -50)));
+            QEvent leave(QEvent::Leave); QApplication::sendEvent(&list, &leave);
+            QVERIFY(!list.delayHovered(index)); QCOMPARE(render(), normal);
+        }
+        QTest::mousePress(list.viewport(), Qt::LeftButton, Qt::NoModifier, list.delayRect(item).center());
+        QTest::mouseRelease(list.viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(2, 2));
+        QCOMPARE(tests.count(), 0); QCOMPARE(switches, 0);
+        QTest::mouseClick(list.viewport(), Qt::LeftButton, Qt::NoModifier, list.delayRect(item).center());
+        QCOMPARE(tests.count(), 1); QCOMPARE(switches, 0);
+    }
     void nodeTestsAnimateAndKeepCardsStable()
     {
         QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR");
@@ -1578,6 +1612,7 @@ private slots:
         settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
         int delayRequests = 0, groupRequests = 0, switchRequests = 0, providerRequests = 0;
         QStringList testedUrls; QList<int> testedTimeouts;
+        bool includeTestUrl = true; int extraNodes = 0;
         connect(&server, &QTcpServer::newConnection, this, [&] {
             while (auto *s = server.nextPendingConnection()) {
                 auto buffer = QSharedPointer<QByteArray>::create();
@@ -1600,6 +1635,12 @@ private slots:
                         QJsonObject proxies{{"组", QJsonObject{{"type", "Selector"}, {"all", QJsonArray{"日本", "香港"}}, {"now", "日本"}, {"testUrl", "https://group.example/204"}}},
                             {"日本", QJsonObject{{"type", "Hysteria2"}, {"history", QJsonArray{QJsonObject{{"delay", 0}}}}}},
                             {"香港", QJsonObject{{"type", "Hysteria2"}, {"history", QJsonArray{QJsonObject{{"delay", 0}}}}}}};
+                        if (!includeTestUrl) { auto group = proxies["组"].toObject(); group.remove("testUrl"); group["displayName"] = "runtime-snapshot fixture"; proxies["组"] = group; }
+                        if (extraNodes) {
+                            auto group = proxies["组"].toObject(); auto members = group["all"].toArray();
+                            for (int i = 0; i < extraNodes; ++i) { const auto name = QString("extra-%1").arg(i); members.append(name); proxies[name] = QJsonObject{{"type", "Direct"}}; }
+                            group["all"] = members; proxies["组"] = group;
+                        }
                         body = QJsonDocument(QJsonObject{{"proxies", proxies}}).toJson(QJsonDocument::Compact);
                     } else if (request.startsWith("GET /providers/proxies ")) {
                         QJsonObject provider{{"proxies", QJsonArray{QJsonObject{{"name", "日本"}, {"type", "Hysteria2"}}}}};
@@ -1678,6 +1719,30 @@ private slots:
             QVERIFY(nodes->item(1)->data(NodeTestingRole).toBool());
             QTRY_VERIFY(!nodes->item(1)->data(NodeTestingRole).toBool());
             QCOMPARE(delayRequests, 6); QCOMPARE(nodes->currentRow(), 0);
+            // Reading the already running configuration must never evaluate an override
+            // on the click path, and the first spinner frame must be painted immediately.
+            QDir().mkpath(dir.path() + "/work");
+            writeFile(dir.path() + "/work/config.yaml", "proxy-groups: [{name: 组, type: select, proxies: [日本, 香港], url: https://runtime.example/204}]\n");
+            writeFile(dir.path() + "/override.js", "function main(config) { const end = Date.now() + 1200; while (Date.now() < end) {} return config; }");
+            const auto id = store.saveProfile("slow override", {}, "proxies: []\nrules: [MATCH,DIRECT]\n");
+            auto latest = store.settings(); latest["active"] = id; latest["scriptEnabled"] = true; store.setSettings(latest);
+            includeTestUrl = false; testUrl->clear();
+            QTest::mouseClick(refresh, Qt::LeftButton);
+            QTRY_VERIFY(policyButton(panel, "proxy-group-header", "组")->text().contains("runtime-snapshot fixture"));
+            nodes = policyNodes(panel, "组"); QVERIFY(nodes); first = nodes->item(0);
+            class PaintCounter : public QObject { public: int count = 0; bool eventFilter(QObject *, QEvent *event) override { if (event->type() == QEvent::Paint) ++count; return false; } } paints;
+            nodes->viewport()->installEventFilter(&paints);
+            QElapsedTimer clickTime; clickTime.start();
+            QTest::mouseClick(nodes->viewport(), Qt::LeftButton, Qt::NoModifier, nodes->delayRect(first).center());
+            QVERIFY2(clickTime.elapsed() < 250, qPrintable(QString::number(clickTime.elapsed())));
+            qInfo("Node test click feedback: %lld ms", static_cast<long long>(clickTime.elapsed()));
+            QVERIFY(first->data(NodeTestingRole).toBool()); QVERIFY(paints.count > 0);
+            QTRY_COMPARE(delayRequests, 7); QCOMPARE(testedUrls.last(), QString("https://runtime.example/204"));
+            QTRY_VERIFY(!first->data(NodeTestingRole).toBool()); QCOMPARE(switchRequests, 0);
+            nodes->viewport()->removeEventFilter(&paints);
+            extraNodes = 30; QTest::mouseClick(refresh, Qt::LeftButton);
+            QTRY_COMPARE(nodes->count(), 32); QTRY_VERIFY(nodes->height() > 360);
+            QTRY_VERIFY(nodes->verticalScrollBar()->maximum() > 0);
             panel.hide();
         }
         if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);

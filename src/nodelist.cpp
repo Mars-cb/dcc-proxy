@@ -36,6 +36,8 @@ public:
         const bool testing = index.data(NodeTestingRole).toBool();
         const bool selected = option.state & QStyle::State_Selected;
         const bool hover = option.state & QStyle::State_MouseOver;
+        const auto *list = qobject_cast<NodeList *>(parent());
+        const bool delayHover = list && list->delayHovered(index) && (option.state & QStyle::State_Enabled);
         QColor background = palette.color(QPalette::Base);
         QColor border = palette.color(QPalette::Mid);
         border.setAlpha(85);
@@ -86,8 +88,9 @@ public:
         const int delayWidth = statusRect(option.rect, font, index).width();
         painter->drawText(detail.adjusted(0, 0, -delayWidth, 0), Qt::AlignLeft | Qt::AlignVCenter,
                           painter->fontMetrics().elidedText(index.data(NodeTypeRole).toString(), Qt::ElideRight, detail.width() - delayWidth));
-        if (testing) painter->setPen(palette.color(QPalette::Highlight));
+        if (testing || delayHover) painter->setPen(palette.color(QPalette::Highlight));
         else if (delay >= 0) painter->setPen(delay == 0 || delay > 500 ? QColor("#de645b") : (delay > 200 ? QColor("#c18725") : QColor("#21a675")));
+        if (delayHover && !testing) { font.setUnderline(true); painter->setFont(font); }
         painter->drawText(detail, Qt::AlignRight | Qt::AlignVCenter, text);
         if ((option.state & QStyle::State_HasFocus) && selected) {
             painter->setBrush(Qt::NoBrush);
@@ -142,6 +145,25 @@ QRect NodeList::delayRect(const QListWidgetItem *item) const
     if (!item) return {};
     auto font = item->font(); font.setBold(false);
     return statusRect(visualItemRect(item), font, indexFromItem(item));
+}
+void NodeList::updateDelayHover(const QPoint &position)
+{
+    const auto *item = itemAt(position);
+    const QModelIndex hovered = item && delayRect(item).contains(position) ? indexFromItem(item) : QModelIndex();
+    if (hovered == m_hoveredDelay) return;
+    const auto previous = m_hoveredDelay; m_hoveredDelay = hovered;
+    if (previous.isValid()) viewport()->update(visualRect(previous));
+    if (hovered.isValid()) viewport()->update(visualRect(hovered));
+}
+void NodeList::mouseMoveEvent(QMouseEvent *event)
+{
+    QListWidget::mouseMoveEvent(event);
+    updateDelayHover(event->pos());
+}
+void NodeList::leaveEvent(QEvent *event)
+{
+    updateDelayHover(QPoint(-1, -1));
+    QListWidget::leaveEvent(event);
 }
 void NodeList::mousePressEvent(QMouseEvent *event)
 {

@@ -217,8 +217,6 @@ private:
     QSet<int> m_testPages;
     QMap<QString, QPair<QDateTime, int>> m_testResults;
     QMap<QString, QString> m_testErrors;
-    QString m_testQuery;
-    int m_testTimeoutMs = 5000;
     int m_activeTests = 0;
     int m_testPassed = 0;
     int m_testFailed = 0;
