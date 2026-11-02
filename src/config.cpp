@@ -431,6 +431,23 @@ QByteArray Store::runtime(const QString &id) const
     if (node["tun"]["enable"].as<bool>()) {
         node["dns"] = node["dns"] ? mergeYaml(defaultTunDns(), node["dns"]) : defaultTunDns();
         node["dns"]["enable"] = true;
+        auto tunDefaults = defaultTunDns();
+        auto filterPlainDns = [&tunDefaults](YAML::Node dns, const std::string &field) {
+            if (!dns[field] || !dns[field].IsSequence()) return;
+            YAML::Node filtered(YAML::NodeType::Sequence);
+            for (const auto &e : dns[field]) {
+                const auto v = e.as<std::string>();
+                if (v.rfind("tls://", 0) == 0 || v.rfind("https://", 0) == 0 || v.rfind("quic://", 0) == 0)
+                    filtered.push_back(e);
+            }
+            if (filtered.size() == 0 && tunDefaults[field] && tunDefaults[field].IsSequence() && tunDefaults[field].size() > 0)
+                filtered = YAML::Clone(tunDefaults[field]);
+            dns[field] = filtered;
+        };
+        filterPlainDns(node["dns"], "default-nameserver");
+        filterPlainDns(node["dns"], "nameserver");
+        filterPlainDns(node["dns"], "fallback");
+        filterPlainDns(node["dns"], "direct-nameserver");
     } else if (!node["dns"] || !node["dns"]["enable"] || !node["dns"]["enable"].as<bool>()) {
         node["tun"]["dns-hijack"] = YAML::Node(YAML::NodeType::Sequence);
     }

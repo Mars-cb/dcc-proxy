@@ -522,6 +522,58 @@ private slots:
         const auto validated = validateTunOptions({{"route-exclude-address", QJsonArray{"192.168.7.9/16", "fc00::/7"}}});
         QCOMPARE(validated["route-exclude-address"].toArray().first().toString(), QString("192.168.0.0/16"));
         QVERIFY(!validated.contains("enable"));
+
+        const auto id2 = store.saveProfile("DNS filter", {},
+            "mixed-port: 16666\n"
+            "dns:\n"
+            "  enable: true\n"
+            "  default-nameserver: [223.5.5.5, 119.29.29.29]\n"
+            "  nameserver: [223.5.5.5, 114.114.114.114, https://dns.alidns.com/dns-query]\n"
+            "  fallback: [8.8.8.8, tls://1.0.0.1:853]\n"
+            "rules: [\"MATCH,DIRECT\"]\n");
+        config = parseConfig(store.runtime(id2));
+        QVERIFY(config["tun"]["enable"].as<bool>());
+        auto assertEncrypted = [](const YAML::Node &seq) {
+            for (const auto &e : seq) {
+                const auto s = e.as<std::string>();
+                QVERIFY2(s.rfind("tls://", 0) == 0 || s.rfind("https://", 0) == 0,
+                          ("plain-53 DNS leaked: " + s).c_str());
+            }
+        };
+        assertEncrypted(config["dns"]["default-nameserver"]);
+        assertEncrypted(config["dns"]["nameserver"]);
+        assertEncrypted(config["dns"]["fallback"]);
+        bool hasDoh = false;
+        for (const auto &e : config["dns"]["nameserver"])
+            if (e.as<std::string>() == "https://dns.alidns.com/dns-query") hasDoh = true;
+        QVERIFY(hasDoh);
+    }
+    void tunPlainDnsListsFallBackToDefaults()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const QByteArray profile =
+            "dns:\n"
+            "  enable: true\n"
+            "  default-nameserver: [223.5.5.5]\n"
+            "  nameserver: [114.114.114.114]\n"
+            "  fallback: [8.8.8.8]\n"
+            "  direct-nameserver: [119.29.29.29]\n"
+            "rules: [\"MATCH,DIRECT\"]\n";
+        const auto id = store.saveProfile("Plain DNS", {}, profile);
+        writeFile(dir.path() + "/controlled.yaml", "tun: {enable: true}\n");
+        auto config = parseConfig(store.runtime(id));
+        const auto defaults = defaultTunDns();
+        for (const char *field : {"default-nameserver", "nameserver", "fallback", "direct-nameserver"}) {
+            QVERIFY(config["dns"][field].IsSequence());
+            QCOMPARE(emitYaml(config["dns"][field]), emitYaml(defaults[field]));
+        }
+        QCOMPARE(store.profile(id), profile);
+
+        writeFile(dir.path() + "/controlled.yaml", "tun: {enable: false}\n");
+        config = parseConfig(store.runtime(id));
+        const auto original = parseConfig(profile);
+        for (const char *field : {"default-nameserver", "nameserver", "fallback", "direct-nameserver"})
+            QCOMPARE(emitYaml(config["dns"][field]), emitYaml(original["dns"][field]));
     }
     void overviewStableAndNativeSwitch()
     {
