@@ -19,7 +19,7 @@ while read -r component version checksum; do
     tar -xf "$archive" --strip-components=1 --no-same-owner -C "$source_dir"
     cmake -S "$source_dir" -B "$source_dir/build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-        -DDTK_VERSION="$version" -DDVERSION="$version" \
+        -DDTK_VERSION="$version" -DDVERSION="$version" -DVERSION="$version" \
         -DBUILD_DOCS=OFF -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_PLUGINS=OFF \
         -DDTK_DISABLE_LIBXDG=ON -DDTK_DISABLE_EX_IMAGE_FORMAT=ON
     cmake --build "$source_dir/build" --parallel "${DCC_PROXY_JOBS:-2}"
