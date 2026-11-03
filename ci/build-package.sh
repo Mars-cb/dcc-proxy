@@ -27,4 +27,5 @@ python3 tests/smoke_stability.py --service "$package_root/usr/lib/dcc-proxy/dde-
 printf 'version=%s\ncommit=%s\narchitecture=%s\nqt=%s\n' \
     "$DCC_PROXY_PACKAGE_VERSION" "${GITHUB_SHA:-unknown}" "$builder_arch" "$(qmake -query QT_VERSION)" > "dist/build-info-${builder_arch}.txt"
 cat ci/dtk-sources.tsv >> "dist/build-info-${builder_arch}.txt"
+sha256sum ci/qt511-dtkwidget.patch >> "dist/build-info-${builder_arch}.txt"
 (cd dist && sha256sum "$(basename "$package")" > "SHA256SUMS-${builder_arch}")

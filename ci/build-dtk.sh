@@ -17,6 +17,11 @@ while read -r component version checksum; do
     source_dir="$build_root/$component-$version"
     mkdir -p "$source_dir"
     tar -xf "$archive" --strip-components=1 --no-same-owner -C "$source_dir"
+    if [[ "$component" == dtkwidget ]]; then
+        # Upstream also has an integer-metric fallback for pre-Qt6.2 builds.
+        # Guard only the new enum label; no public interface or shipped library changes.
+        patch --batch --forward -p1 -d "$source_dir" < "$ci_dir/qt511-dtkwidget.patch"
+    fi
     cmake -S "$source_dir" -B "$source_dir/build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
         -DDTK_VERSION="$version" -DDVERSION="$version" -DVERSION="$version" \

@@ -31,7 +31,9 @@ APT 使用公开的 Debian 10 归档源及归档安全更新源。DTK common 5.6
 Widget 5.6.9 从 linuxdeepin 官方源码构建，并在解压前验证 `ci/dtk-sources.tsv` 的 SHA-256。
 选择互相兼容且不高于目标系统的 SDK：目标 UOS 的 Widget 5.6.18 能满足所需运行库版本，
 不会为适配公开源码中的新接口而要求升级系统 Gui 库。Widget SDK 原生支持 Qt 5.11，
-项目所用的二级列表、密码框等接口均在该版本中存在；不为构建环境打修改产品行为的补丁。
+项目所用的二级列表、密码框等接口均在该版本中存在。原版 Qt 5.11 缺少一处
+`PM_LineEditIconSize` 枚举，构建 SDK 通过 `ci/qt511-dtkwidget.patch` 使用源码已有的旧版指标回退；
+补丁不改公开接口，且最终 deb 不包含这套 SDK 运行库。构建记录包含补丁校验值。
 构建镜像只用于编译，最终 deb 不捆绑这些 DTK/Qt 动态库，也不替换系统 DTK。
 
 DTK 在构建环境中登记库的包归属及 shlibs，确保 CPack 能生成真正的系统依赖声明。

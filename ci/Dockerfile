@@ -3,6 +3,6 @@ FROM debian:buster-slim@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4
 ENV DEBIAN_FRONTEND=noninteractive QT_QPA_PLATFORM=offscreen LANG=C.UTF-8
 COPY install-build-deps.sh /opt/dcc-proxy-ci/
 RUN bash /opt/dcc-proxy-ci/install-build-deps.sh
-COPY build-dtk.sh dtk-sources.tsv /opt/dcc-proxy-ci/
+COPY build-dtk.sh dtk-sources.tsv qt511-dtkwidget.patch /opt/dcc-proxy-ci/
 RUN bash /opt/dcc-proxy-ci/build-dtk.sh && rm -rf /tmp/dcc-proxy-dtk
 WORKDIR /project

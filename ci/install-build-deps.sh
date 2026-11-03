@@ -12,7 +12,7 @@ printf 'deb http://archive.debian.org/debian buster main\ndeb http://archive.deb
 printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "3";\n' > /etc/apt/apt.conf.d/99archive
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential cmake ninja-build pkg-config python3 git curl ca-certificates \
+    build-essential cmake ninja-build pkg-config python3 git curl ca-certificates patch \
     dpkg-dev debhelper fakeroot file openssl gzip xz-utils dbus-x11 fonts-dejavu-core \
     qtbase5-dev qtbase5-private-dev qtdeclarative5-dev qttools5-dev qttools5-dev-tools \
     libqt5svg5-dev libqt5x11extras5-dev libgsettings-qt-dev libxcb-util0-dev \
