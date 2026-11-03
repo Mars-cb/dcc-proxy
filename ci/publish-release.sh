@@ -8,7 +8,15 @@ for arch in amd64 arm64; do
     test -f "dcc-proxy_${PACKAGE_VERSION}_${arch}.deb"
     sha256sum --check --strict "SHA256SUMS-${arch}"
 done
-cat SHA256SUMS-amd64 SHA256SUMS-arm64 > SHA256SUMS
+# GitHub normalizes ~ in asset names to a dot. Publish those exact names so
+# downloaded files, checksums and installation instructions remain consistent.
+asset_version="${PACKAGE_VERSION//\~/.}"
+for arch in amd64 arm64; do
+    original="dcc-proxy_${PACKAGE_VERSION}_${arch}.deb"
+    published="dcc-proxy_${asset_version}_${arch}.deb"
+    if [[ "$original" != "$published" ]]; then mv -- "$original" "$published"; fi
+done
+sha256sum "dcc-proxy_${asset_version}_amd64.deb" "dcc-proxy_${asset_version}_arm64.deb" > SHA256SUMS
 notes="$RUNNER_TEMP/dcc-proxy-release-notes.md"
 cat > "$notes" <<EOF
 自动构建版本：\`$PACKAGE_VERSION\`
@@ -21,7 +29,7 @@ cat > "$notes" <<EOF
 
 - Intel/AMD 64 位电脑下载 \`amd64.deb\`，ARM64 电脑下载 \`arm64.deb\`。
 - 内核、对应源码与基础地理数据库已随包提供；Qt/DTK 使用系统运行库。
-- 安装示例：\`sudo apt install ./dcc-proxy_${PACKAGE_VERSION}_amd64.deb\`。
+- 安装示例：\`sudo apt install ./dcc-proxy_${asset_version}_amd64.deb\`。
 - 安装不会自动重启正在运行的代理后台或内核。
 - 仅在两种架构的编译、回归测试、插件加载和包兼容性检查全部通过后发布。
 
