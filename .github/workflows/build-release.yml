@@ -72,6 +72,16 @@ jobs:
             -e HOME=/tmp/ci-home -e GITHUB_SHA -e DCC_PROXY_PACKAGE_VERSION \
             -v "$GITHUB_WORKSPACE:/project" -w /project dcc-proxy-builder:ci \
             bash ci/build-package.sh
+      - name: Capture builder failure details
+        if: failure()
+        run: |
+          docker buildx history logs > builder.log 2>&1 || true
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('builder.log').read_text(errors='replace').splitlines()[-100:]
+          text = '\n'.join(lines).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::error title=Builder diagnostics::' + text)
+          PY
       - name: Keep validated packages
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -87,7 +97,9 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: diagnostics-${{ matrix.arch }}
-          path: build-*/Testing/Temporary/LastTest.log
+          path: |
+            build-*/Testing/Temporary/LastTest.log
+            builder.log
           if-no-files-found: ignore
           retention-days: 7
 
