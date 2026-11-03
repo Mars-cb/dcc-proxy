@@ -28,7 +28,9 @@ Qt、DTK 和控制中心仍由系统提供；内核、对应源码和四个基�
 
 `ci/Dockerfile` 固定官方 Debian 10 多架构镜像摘要，其 glibc 2.28 / Qt 5.11 基线与目标 UOS 20 对齐。
 APT 使用公开的 Debian 10 归档源及归档安全更新源。DTK common 5.6.4、Core 5.6.13、Gui 5.6.9、
-Widget 5.6.18 从 linuxdeepin 官方源码构建，并在解压前验证 `ci/dtk-sources.tsv` 的 SHA-256。
+Widget 5.6.13 从 linuxdeepin 官方源码构建，并在解压前验证 `ci/dtk-sources.tsv` 的 SHA-256。
+选择互相兼容且不高于目标系统的 SDK：目标 UOS 的 Widget 5.6.18 能满足所需运行库版本，
+不会为适配公开源码中的新接口而要求升级系统 Gui 库。
 构建镜像只用于编译，最终 deb 不捆绑这些 DTK/Qt 动态库，也不替换系统 DTK。
 
 DTK 在构建环境中登记库的包归属及 shlibs，确保 CPack 能生成真正的系统依赖声明。
