@@ -1,0 +1,13 @@
+--- a/src/widgets/dstyle.cpp
++++ b/src/widgets/dstyle.cpp
+@@ -2191,8 +2191,10 @@
+         return 16;
+     case PM_MenuButtonIndicator:
+         return DSizeModeHelper::element(8, QCommonStyle::pixelMetric(m, opt, widget));
++#if QT_VERSION >= QT_VERSION_CHECK(6, 2, 0)
+     case PM_LineEditIconSize:
+         return DSizeModeHelper::element(20, 20);
++#endif
+     default:
+         break;
+     }

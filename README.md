@@ -1,11 +1,20 @@
 # dcc-proxy
 
+[![Build deb](https://github.com/Mars-cb/dcc-proxy/actions/workflows/build-release.yml/badge.svg)](https://github.com/Mars-cb/dcc-proxy/actions/workflows/build-release.yml)
+
 UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模块名均为 `dcc-proxy`，
 后台进程名为 `dde-mihomo-daemon`。关闭控制中心后，后台内核继续提供代理。
 
 ![节点卡片网格示例（虚拟节点）](docs/screenshots/node-grid.png)
 
 ## 构建和安装
+
+可直接从 [Releases](https://github.com/Mars-cb/dcc-proxy/releases) 下载对应架构的 deb：
+Intel/AMD 64 位选择 `amd64`，ARM64 选择 `arm64`。每次 `main` 提交通过云端测试后自动发布
+带提交编号的预发布包；`vX.Y.Z` 标签发布正式包。下载后使用 `sudo apt install ./dcc-proxy_版本_架构.deb`。
+自动包包含 Mihomo 内核、对应源码和基础地理数据库，使用目标系统已有的 Qt 5 / DTK 5 运行库。
+适用 UOS 20（Qt 5.11 / DTK 5.6 控制中心），不承诺适用于 Qt 6 或新接口的控制中心。
+云端构建环境、版本规则与发布步骤见 [自动打包说明](docs/AUTOMATED-BUILDS.md)。
 
 使用已安装的 CMake、C++ 编译器、Qt 5.11+（Core、Widgets、Network、Qml、DBus、Test）和
 `dde-control-center-dev` 与 `libdtkwidget-dev`。YAML 解析器已随源码提供，不需要安装新依赖。
@@ -15,14 +24,14 @@ UOS / Deepin 控制中心的原生 Qt 5 私人代理插件。插件包名和模�
 ```sh
 cd /data/work/dcc-proxy
 dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../dcc-proxy_0.1.11_$(dpkg --print-architecture).deb
+sudo dpkg -i ../dcc-proxy_0.1.12_$(dpkg --print-architecture).deb
 ```
 
 也可继续使用 CPack 脚本（产物位于 `dist/`）：
 
 ```sh
 ./tools/build-deb.sh
-sudo dpkg -i dist/dcc-proxy_0.1.11_$(dpkg --print-architecture).deb
+sudo dpkg -i dist/dcc-proxy_0.1.12_$(dpkg --print-architecture).deb
 ```
 
 两种方式共用 `tools/prepare-core.sh` 和 `tools/prepare-geodata.py`，优先复用 `cores/` 中通过 SHA-256 校验的官方内核和源码归档；

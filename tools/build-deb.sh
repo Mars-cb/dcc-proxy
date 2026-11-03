@@ -5,6 +5,9 @@ package_arch="$(dpkg --print-architecture)"
 build_dir="${project_dir}/build-${package_arch}"
 core_version="$(cat "$project_dir/packaging/mihomo.version")"
 cmake_args=(-S "$project_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr)
+package_version="${DCC_PROXY_PACKAGE_VERSION:-$(python3 "$project_dir/ci/version.py" --base)}"
+dpkg --validate-version "$package_version"
+cmake_args+=(-DDCC_PROXY_PACKAGE_VERSION="$package_version")
 if [[ "${1:-}" != "--without-core" ]]; then
   "$project_dir/tools/prepare-core.sh" "$package_arch"
   cmake_args+=(-DMIHOMO_BINARY="$project_dir/cores/$package_arch/mihomo" -DMIHOMO_SOURCE_ARCHIVE="$project_dir/cores/mihomo-${core_version}-source.tar.gz")
