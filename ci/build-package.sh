@@ -24,8 +24,11 @@ export DCC_PROXY_GEODATA_DIR="$package_root/usr/share/dcc-proxy"
 # temporary stores/ports and cannot access the desktop's real proxy settings.
 python3 tests/smoke_real_core.py --service "$package_root/usr/lib/dcc-proxy/dde-mihomo-daemon" --core "$package_root/usr/lib/dcc-proxy/mihomo"
 python3 tests/smoke_stability.py --service "$package_root/usr/lib/dcc-proxy/dde-mihomo-daemon" --core "$package_root/usr/lib/dcc-proxy/mihomo"
+# Avoid qtchooser defaults and fail rather than publish an empty baseline.
+qt_version="$(/usr/lib/qt5/bin/qmake -query QT_VERSION)"
+[[ "$qt_version" == 5.11.* ]] || { echo "Unexpected Qt baseline: $qt_version" >&2; exit 1; }
 printf 'version=%s\ncommit=%s\narchitecture=%s\nqt=%s\n' \
-    "$DCC_PROXY_PACKAGE_VERSION" "${GITHUB_SHA:-unknown}" "$builder_arch" "$(qmake -query QT_VERSION)" > "dist/build-info-${builder_arch}.txt"
+    "$DCC_PROXY_PACKAGE_VERSION" "${GITHUB_SHA:-unknown}" "$builder_arch" "$qt_version" > "dist/build-info-${builder_arch}.txt"
 cat ci/dtk-sources.tsv >> "dist/build-info-${builder_arch}.txt"
 sha256sum ci/qt511-dtkwidget.patch >> "dist/build-info-${builder_arch}.txt"
 (cd dist && sha256sum "$(basename "$package")" > "SHA256SUMS-${builder_arch}")
