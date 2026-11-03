@@ -78,7 +78,15 @@ jobs:
           docker buildx history logs > builder.log 2>&1 || true
           python3 - <<'PY'
           from pathlib import Path
-          lines = Path('builder.log').read_text(errors='replace').splitlines()[-100:]
+          all_lines = Path('builder.log').read_text(errors='replace').splitlines()
+          markers = [i for i, line in enumerate(all_lines) if ' error:' in line or 'CMake Error' in line or 'undefined reference' in line]
+          if not markers:
+              markers = [i for i, line in enumerate(all_lines) if 'FAILED:' in line]
+          if markers:
+              first = markers[0]
+              lines = all_lines[max(0, first - 1):first + 12] + all_lines[-3:]
+          else:
+              lines = all_lines[-25:]
           text = '\n'.join(lines).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
           print('::error title=Builder diagnostics::' + text)
           PY
