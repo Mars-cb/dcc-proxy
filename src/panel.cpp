@@ -317,6 +317,16 @@ QWidget *Panel::overviewPage()
     m_mode->addItem(tr("规则"), "rule"); m_mode->addItem(tr("全局"), "global"); m_mode->addItem(tr("直连"), "direct");
     form->addRow(tr("代理模式"), m_mode);
     connect(m_mode, QOverload<int>::of(&QComboBox::activated), this, [this](int) { patchConfig({{"mode", m_mode->currentData().toString()}}); });
+    m_ipv6Switch = nativeSwitch("ipv6-switch");
+    m_ipv6Switch->setAccessibleName(tr("启用 IPv6"));
+    m_ipv6Switch->setToolTip(tr("允许内核使用 IPv6；DNS 是否返回 IPv6 地址可在 DNS 设置中单独调整。"));
+    m_ipv6Switch->setEnabled(false);
+    form->addRow(tr("启用 IPv6"), m_ipv6Switch);
+    connect(m_ipv6Switch, &QAbstractButton::clicked, this, [this](bool enabled) {
+        if (!m_connected || m_ipv6Busy || m_coreBusy || m_configBusy) return;
+        m_ipv6Busy = true; m_ipv6Switch->setEnabled(false);
+        patchConfig({{"ipv6", enabled}}, [this] { m_ipv6Busy = false; refresh(); });
+    });
     layout->addLayout(form);
     auto *advanced = new QGridLayout;
     int sectionIndex = 0;
@@ -385,6 +395,11 @@ void Panel::loadTunSettings()
 void Panel::updateSwitches(const QJsonObject &state)
 {
     m_serviceState = state;
+    m_serviceStatusKnown = true;
+    if (localController(m_store.settings()["endpoint"].toString()) && state["running"].toBool() && !state["capabilities"].toArray().contains("ipv6-checkpoint")) {
+        m_ipv6Switch->setEnabled(false);
+        m_ipv6Switch->setToolTip(tr("当前后台版本尚不支持保存 IPv6 恢复检查点，请在方便时重启服务以加载新版后台。"));
+    }
     if (m_backendVersion) m_backendVersion->setText(tr("界面 %1 · 后台 %2%3").arg(QStringLiteral(DCC_PROXY_VERSION), state["version"].toString(tr("旧版/未知")), state["version"].toString() == QStringLiteral(DCC_PROXY_VERSION) ? QString() : tr("（待正常启动加载新版，未自动重启）")));
     const bool local = localController(m_store.settings()["endpoint"].toString());
     const bool busy = state["busy"].toBool() || m_coreBusy;
@@ -1358,7 +1373,7 @@ void Panel::saveSettings()
     guarded([&] {
         QString error;
         if (!m_api.configure(m_endpoint->text(), m_secret->text(), &error)) { message(error, true); return; }
-        m_reads.clear(); m_polling = false; m_pageMessages.clear(); m_selecting = false;
+        m_reads.clear(); m_polling = false; m_serviceStatusKnown = false; m_pageMessages.clear(); m_selecting = false;
         if (localController(m_endpoint->text()) && !QFileInfo(m_corePath->text()).isExecutable()) throw std::runtime_error("内核路径不是可执行文件，原设置已保留");
         auto s = m_store.settings();
         if (localController(s["endpoint"].toString())) { s["managedEndpoint"] = s["endpoint"]; s["managedSecret"] = s["secret"]; s["managedCore"] = s["core"]; }
@@ -1381,11 +1396,11 @@ void Panel::saveSettings()
         message(tr("设置已保存")); refresh();
     });
 }
-void Panel::patchConfig(const QJsonObject &patch)
+void Panel::patchConfig(const QJsonObject &patch, std::function<void()> finished)
 {
-    m_api.request("PATCH", "/configs", patch, [this, patch](const QJsonValue &, const QString &error) {
-        if (!error.isEmpty()) { message(error, true); refresh(); return; }
-        if (!localController(m_store.settings()["endpoint"].toString())) { message(tr("远程内核设置已应用，本地配置未修改")); refresh(); return; }
+    m_api.request("PATCH", "/configs", patch, [this, patch, finished](const QJsonValue &, const QString &error) {
+        if (!error.isEmpty()) { message(error, true); if (finished) finished(); refresh(); return; }
+        if (!localController(m_store.settings()["endpoint"].toString())) { message(tr("远程内核设置已应用，本地配置未修改")); if (finished) finished(); refresh(); return; }
         guarded([&] {
             const auto path = dataDir() + "/controlled.yaml";
             auto base = QFile::exists(path) ? parseConfig(readFile(path)) : YAML::Node(YAML::NodeType::Map);
@@ -1394,6 +1409,7 @@ void Panel::patchConfig(const QJsonObject &patch)
             if (m_serviceState["capabilities"].toArray().contains("checkpoint")) requestService({{"action", "checkpoint"}, {"patch", patch}}, this, [](const QJsonValue &, const QString &) {});
             message(tr("设置已应用并保存"));
         });
+        if (finished) finished();
         refresh();
     });
 }
@@ -1504,6 +1520,7 @@ void Panel::refresh()
         if ((m_tabs->currentIndex() == 1 || m_tabs->currentIndex() == 4) && (!m_connected || !wasConnected || m_previewing)) refreshProxies();
         if (!m_connected) {
             m_mode->setEnabled(false);
+            m_ipv6Switch->setEnabled(false);
             requestService({{"action", "status"}}, this, [this](const QJsonValue &state, const QString &serviceError) {
                 if (m_connected) return;
                 if (!serviceError.isEmpty() && !state.toObject().contains("running")) { labelText(m_overview, tr("后台未启动。请导入订阅并打开“代理服务”开关。")); return; }
@@ -1520,6 +1537,11 @@ void Panel::refresh()
         labelText(m_overview, tr("内核已连接    混合端口 %1    HTTP %2    SOCKS %3    局域网 %4")
             .arg(config["mixed-port"].toInt()).arg(config["port"].toInt()).arg(config["socks-port"].toInt()).arg(config["allow-lan"].toBool() ? tr("允许") : tr("禁止")));
         { QSignalBlocker block(m_mode); m_mode->setCurrentIndex(m_mode->findData(config["mode"].toString())); }
+        { QSignalBlocker block(m_ipv6Switch); if (!m_ipv6Busy && config["ipv6"].isBool()) m_ipv6Switch->setChecked(config["ipv6"].toBool()); }
+        const bool oldManagedService = localController(m_store.settings()["endpoint"].toString()) && m_serviceState["running"].toBool() && !m_serviceState["capabilities"].toArray().contains("ipv6-checkpoint");
+        m_ipv6Switch->setToolTip(oldManagedService ? tr("当前后台版本尚不支持保存 IPv6 恢复检查点，请在方便时重启服务以加载新版后台。") : tr("允许内核使用 IPv6；DNS 是否返回 IPv6 地址可在 DNS 设置中单独调整。"));
+        const bool serviceReady = !localController(m_store.settings()["endpoint"].toString()) || m_serviceStatusKnown;
+        m_ipv6Switch->setEnabled(serviceReady && !m_coreBusy && !m_configBusy && !m_ipv6Busy && !oldManagedService && config["ipv6"].isBool());
         m_mode->setEnabled(!m_coreBusy && !m_configBusy); renderNodes(); updateWebsiteRule(); syncStreams();
     });
     }

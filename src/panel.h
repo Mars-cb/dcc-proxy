@@ -91,7 +91,7 @@ private:
     void saveSettings();
     void loadSettings();
     void loadPortSettings();
-    void patchConfig(const QJsonObject &patch);
+    void patchConfig(const QJsonObject &patch, std::function<void()> finished = {});
     void editSection(const QString &section);
     void editDocument(const QString &title, const QByteArray &data, std::function<void(QByteArray)> save, const QString &help = {}, const QByteArray &example = {});
     void fetchProfiles(const QUrl &url, const QString &name, const QString &id = {});
@@ -149,6 +149,9 @@ private:
     QPlainTextEdit *m_tunExclude;
     QMap<QString, QAbstractButton *> m_tunFlags;
     QComboBox *m_mode;
+    QAbstractButton *m_ipv6Switch;
+    bool m_ipv6Busy = false;
+    bool m_serviceStatusKnown = false;
     QComboBox *m_group;
     QComboBox *m_nodeSource;
     QComboBox *m_groupsSource;

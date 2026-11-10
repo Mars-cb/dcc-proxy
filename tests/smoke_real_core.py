@@ -149,6 +149,36 @@ def main():
             assert Target.headers_seen.get("User-Agent") == "FixtureBrowser/1.0" and Target.headers_seen.get("X-Fixture") == "preserve", Target.headers_seen
             assert not any(label in str(Target.headers_seen).lower() for label in ("clash", "verge", "mihomo", "party"))
             print("PASS DIRECT selection routes actual HTTP traffic and preserves application headers without injected software labels")
+            initial_ipv6 = api("/configs")["ipv6"]
+            running_pid = command({"action": "status"})["pid"]
+            for enabled in (not initial_ipv6, initial_ipv6):
+                api("/configs", "PATCH", {"ipv6": enabled})
+                assert api("/configs")["ipv6"] is enabled
+                checkpoint = command({"action": "checkpoint", "patch": {"ipv6": enabled}})
+                assert checkpoint.get("ok"), checkpoint
+                expected = ("ipv6: " + ("true" if enabled else "false")).encode()
+                assert expected in (root / "work/config.yaml").read_bytes()
+                assert expected in (root / "work/last-good.yaml").read_bytes()
+                assert command({"action": "status"})["pid"] == running_pid
+                assert through_proxy() == b"dcc-proxy-real-core-ok"
+            rejected_checkpoint = command({"action": "checkpoint", "patch": {"ipv6": "invalid"}})
+            assert rejected_checkpoint.get("error"), rejected_checkpoint
+            assert command({"action": "status"})["pid"] == running_pid
+            print("PASS IPv6 enable/disable readback, checkpoint validation and uninterrupted isolated traffic")
+            controlled_path = root / "controlled.yaml"
+            old_controlled = controlled_path.read_bytes() if controlled_path.exists() else None
+            wanted_ipv6 = not initial_ipv6
+            controlled_path.write_text("ipv6: " + ("true" if wanted_ipv6 else "false") + "\n")
+            restarted = command({"action": "restart", "profile": profile_id})
+            assert not restarted.get("error") and restarted.get("running"), restarted
+            assert api("/configs")["ipv6"] is wanted_ipv6
+            api(path, "PUT", {"name": "DIRECT"})
+            assert through_proxy() == b"dcc-proxy-real-core-ok"
+            api("/configs", "PATCH", {"ipv6": initial_ipv6})
+            assert command({"action": "checkpoint", "patch": {"ipv6": initial_ipv6}}).get("ok")
+            if old_controlled is None: controlled_path.unlink()
+            else: controlled_path.write_bytes(old_controlled)
+            print("PASS IPv6 persists across isolated core restart and proxy traffic resumes")
             api(path, "PUT", {"name": "REJECT"})
             assert api(path)["now"] == "REJECT"
             rejected = False

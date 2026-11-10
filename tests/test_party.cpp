@@ -211,6 +211,69 @@ private slots:
             {{"port", 1.5}}, {{"port", "16666"}}, {{"unknown", 8}}, {{"mixed-port", 8}, {"port", 8}}})
             QVERIFY_EXCEPTION_THROWN(validateProxyPorts(ports), std::runtime_error);
     }
+    void ipv6ControlledSettingPreservesDefaultsAndOverrides()
+    {
+        QTemporaryDir dir; Store store(dir.path());
+        const auto id = store.saveProfile("IPv6", {}, "ipv6: false\ndns: {enable: true, ipv6: false, nameserver: [1.1.1.1]}\nrules: [\"MATCH,DIRECT\"]\n");
+        writeFile(dir.path() + "/override.yaml", "ipv6: true\ndns: {ipv6: false}\n");
+        auto initial = parseConfig(store.runtime(id));
+        QVERIFY(initial["ipv6"].as<bool>()); QVERIFY(!initial["dns"]["ipv6"].as<bool>());
+        writeFile(dir.path() + "/controlled.yaml", "ipv6: false\n");
+        auto controlled = parseConfig(store.runtime(id));
+        QVERIFY(!controlled["ipv6"].as<bool>()); QVERIFY(!controlled["dns"]["ipv6"].as<bool>());
+        writeFile(dir.path() + "/controlled.yaml", "ipv6: true\n");
+        controlled = parseConfig(store.runtime(id));
+        QVERIFY(controlled["ipv6"].as<bool>()); QVERIFY(!controlled["dns"]["ipv6"].as<bool>());
+    }
+    void ipv6SwitchAppliesAndRestoresOnFailure()
+    {
+        QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());
+        Store store; const auto id = store.saveProfile("IPv6", {}, "ipv6: false\nrules: [\"MATCH,DIRECT\"]\n");
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        auto settings = store.settings(); settings["active"] = id; settings["endpoint"] = QString("http://127.0.0.1:%1").arg(server.serverPort()); store.setSettings(settings);
+        bool current = false, fail = false, supportsIpv6 = false; int patches = 0;
+        QLocalServer ipc; QVERIFY(ipc.listen(dir.path() + "/service.sock"));
+        connect(&ipc, &QLocalServer::newConnection, this, [&] {
+            while (auto *socket = ipc.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QLocalSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); if (!buffer->contains('\n')) return;
+                    const auto request = QJsonDocument::fromJson(*buffer).object();
+                    QJsonArray capabilities{"checkpoint"}; if (supportsIpv6) capabilities.append("ipv6-checkpoint");
+                    const QJsonObject result = request["action"].toString() == "status" ? QJsonObject{{"running", true}, {"capabilities", capabilities}} : QJsonObject{{"ok", true}};
+                    socket->write(QJsonDocument(result).toJson(QJsonDocument::Compact) + '\n'); socket->flush(); socket->disconnectFromServer();
+                });
+            }
+        });
+        connect(&server, &QTcpServer::newConnection, this, [&] {
+            while (auto *socket = server.nextPendingConnection()) {
+                auto buffer = QSharedPointer<QByteArray>::create(); connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, socket, [&, socket, buffer] {
+                    buffer->append(socket->readAll()); const int end = buffer->indexOf("\r\n\r\n"); if (end < 0) return;
+                    const auto length = QRegularExpression("Content-Length: (\\d+)", QRegularExpression::CaseInsensitiveOption).match(QString::fromUtf8(buffer->left(end)));
+                    if (length.hasMatch() && buffer->size() < end + 4 + length.captured(1).toInt()) return;
+                    const bool patch = buffer->startsWith("PATCH /configs ");
+                    if (patch) { ++patches; if (!fail) current = QJsonDocument::fromJson(buffer->mid(end + 4)).object()["ipv6"].toBool(); }
+                    const auto body = buffer->startsWith("GET /configs ") ? QJsonDocument(QJsonObject{{"mode", "rule"}, {"ipv6", current}, {"mixed-port", 16666}}).toJson(QJsonDocument::Compact) : QByteArray("{}");
+                    const QByteArray code = patch && fail ? "503 Service Unavailable" : "200 OK";
+                    socket->write("HTTP/1.1 " + code + "\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body); socket->disconnectFromHost();
+                });
+            }
+        });
+        {
+            Panel panel; panel.show(); auto *control = panel.findChild<QAbstractButton *>("ipv6-switch"); QVERIFY(control);
+            QTRY_VERIFY(control->toolTip().contains("后台版本")); QVERIFY(!control->isEnabled()); QVERIFY(!control->isChecked());
+            supportsIpv6 = true;
+            QTRY_VERIFY(control->isEnabled());
+            QTest::mouseClick(control, Qt::LeftButton); QTRY_COMPARE(patches, 1); QTRY_VERIFY(control->isEnabled()); QTRY_VERIFY(control->isChecked());
+            QTRY_VERIFY(QFile::exists(dir.path() + "/controlled.yaml")); QVERIFY(parseConfig(readFile(dir.path() + "/controlled.yaml"))["ipv6"].as<bool>());
+            QVERIFY(parseConfig(store.runtime(id))["ipv6"].as<bool>());
+            fail = true; QTest::mouseClick(control, Qt::LeftButton); QTRY_COMPARE(patches, 2); QTRY_VERIFY(control->isEnabled()); QTRY_VERIFY(control->isChecked());
+            QVERIFY(parseConfig(readFile(dir.path() + "/controlled.yaml"))["ipv6"].as<bool>());
+            panel.hide();
+        }
+        if (oldEnv.isNull()) qunsetenv("DCC_PROXY_DATA_DIR"); else qputenv("DCC_PROXY_DATA_DIR", oldEnv);
+    }
     void proxyPortsUiSavesAndRestores()
     {
         QTemporaryDir dir; const auto oldEnv = qgetenv("DCC_PROXY_DATA_DIR"); qputenv("DCC_PROXY_DATA_DIR", dir.path().toUtf8());

@@ -425,6 +425,7 @@ QByteArray Store::runtime(const QString &id) const
     for (const auto &key : proxyPortKeys())
         if (controlled[key.toStdString()]) node[key.toStdString()] = controlled[key.toStdString()];
     if (controlled["log-level"]) node["log-level"] = controlled["log-level"];
+    if (controlled["ipv6"]) node["ipv6"] = controlled["ipv6"];
     auto tun = defaultTunConfig();
     if (controlled["tun"]) tun = mergeYaml(tun, controlled["tun"]);
     node["tun"] = node["tun"] ? mergeYaml(node["tun"], tun) : tun;

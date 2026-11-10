@@ -213,7 +213,7 @@ private:
     {
         return {{"running", m_core.state() == QProcess::Running}, {"pid", double(m_core.processId())}, {"daemonPid", double(QCoreApplication::applicationPid())}, {"serviceRestart", m_serviceRestart},
                 {"profile", m_profile}, {"error", m_error}, {"busy", m_busy}, {"version", QCoreApplication::applicationVersion()}, {"orphan", m_orphan},
-                {"capabilities", QJsonArray{"apply", "candidate-validation", "independent-rules", "orphan-recovery", "checkpoint", "restart-state"}}, {"root", processRunsAsRoot(m_core.processId())},
+                {"capabilities", QJsonArray{"apply", "candidate-validation", "independent-rules", "orphan-recovery", "checkpoint", "ipv6-checkpoint", "restart-state"}}, {"root", processRunsAsRoot(m_core.processId())},
                 {"tun", QJsonObject{{"enable", m_tunEnabled && QNetworkInterface::interfaceFromName(m_tunDevice).isValid()},
                                      {"device", m_tunDevice}, {"permission", hasTunPermission(m_store.managedSettings()["core"].toString())},
                                      {"processPermission", processHasTunPermission(m_core.processId())}}}};
@@ -682,7 +682,8 @@ private:
             const auto patch = command["patch"].toObject();
             for (auto it = patch.begin(); it != patch.end(); ++it)
                 if ((it.key() != "mode" || !QStringList{"rule", "global", "direct"}.contains(it.value().toString())) &&
-                    (it.key() != "log-level" || !QStringList{"debug", "info", "warning", "error", "silent"}.contains(it.value().toString())))
+                    (it.key() != "log-level" || !QStringList{"debug", "info", "warning", "error", "silent"}.contains(it.value().toString())) &&
+                    (it.key() != "ipv6" || !it.value().isBool()))
                     throw std::runtime_error("不支持的配置检查点字段");
             const auto path = dataDir() + "/work/config.yaml";
             writeFile(path, emitYaml(mergeYaml(parseConfig(readFile(path)), parseConfig(QJsonDocument(patch).toJson()))));
