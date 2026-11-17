@@ -38,6 +38,7 @@
 #include <sys/socket.h>
 #include <signal.h>
 #include <unistd.h>
+#include <cerrno>
 #include <functional>
 
 using namespace Party;
@@ -876,8 +877,15 @@ int main(int argc, char **argv)
         if (app.arguments().contains("--validate-store")) {
             const int index = app.arguments().indexOf("--validate-store");
             if (index + 1 >= app.arguments().size()) return 2;
-            QFile input; input.open(stdin, QIODevice::ReadOnly);
-            const auto bytes = input.read(32 * 1024 * 1024 + 1);
+            QByteArray bytes;
+            char buffer[8192];
+            while (bytes.size() <= 32 * 1024 * 1024) {
+                const auto count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+                if (count < 0 && errno == EINTR) continue;
+                if (count < 0) throw std::runtime_error("读取配置请求失败");
+                if (count == 0) break;
+                bytes.append(buffer, int(count));
+            }
             if (bytes.size() > 32 * 1024 * 1024) throw std::runtime_error("配置请求过大");
             const auto request = QJsonDocument::fromJson(bytes);
             if (!request.isObject()) throw std::runtime_error("配置请求无效");
@@ -993,7 +1001,7 @@ int main(int argc, char **argv)
             ::signal(SIGINT, stopSignal);
         }
         return app.exec();
-    } catch (const std::exception &e) { QTextStream(stderr) << e.what() << '\n'; return 1; }
+    } catch (const std::exception &e) { QTextStream(stderr) << QString::fromUtf8(e.what()) << '\n'; return 1; }
 }
 
 #include "service.moc"

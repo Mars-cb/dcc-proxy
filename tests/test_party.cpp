@@ -1055,6 +1055,9 @@ private slots:
         QTest::addColumn<bool>("success");
         QTest::newRow("neutral-success") << QString() << 200 << 200 << false << false << false << 1 << true;
         QTest::newRow("403-compatible-success") << QString() << 403 << 200 << false << false << false << 2 << true;
+        QTest::newRow("404-compatible-success") << QString() << 404 << 200 << false << false << false << 2 << true;
+        QTest::newRow("404-custom-agent-preserved") << QString("CustomClient/1.0") << 404 << 200 << false << false << false << 1 << false;
+        QTest::newRow("404-retry-bounded") << QString() << 404 << 404 << false << false << false << 2 << false;
         QTest::newRow("custom-agent-preserved") << QString("CustomClient/1.0") << 403 << 200 << false << false << false << 1 << false;
         QTest::newRow("401-no-agent-retry") << QString() << 401 << 200 << false << false << false << 1 << false;
         QTest::newRow("403-retry-bounded") << QString() << 403 << 403 << false << false << false << 2 << false;
@@ -1107,7 +1110,7 @@ private slots:
             QVERIFY2(error.isEmpty(), qPrintable(error)); QCOMPARE(bytes, subscription);
             QCOMPARE(metadata["suggestedUpdateMinutes"].toInt(), 720);
             QCOMPARE(metadata["usage"].toObject()["total"].toString(), QString("1024"));
-            if (initialStatus == 403) {
+            if (initialStatus == 403 || initialStatus == 404) {
                 QCOMPARE(metadata["userAgent"].toString(), QString("clash-verge/v2.4.2"));
                 QVERIFY(requests.last().contains("User-Agent: clash-verge/v2.4.2\r\n"));
             } else QVERIFY(!metadata.contains("userAgent"));
@@ -1401,6 +1404,24 @@ private slots:
         QVERIFY(!QFile::exists(dir.path() + "/override.yaml")); QVERIFY(!QFile::exists(dir.path() + "/customizations.json"));
         QVERIFY(!QFile::exists(store.profilePath(other))); QCOMPARE(store.profiles().size(), 1);
         QVERIFY(QFile::exists(dir.path() + "/before-restore.json"));
+    }
+    void validationReadsFragmentedInputAndReportsUtf8()
+    {
+        if (testCore().isEmpty()) QSKIP("Requires the bundled core");
+        QTemporaryDir dir; Store store(dir.path());
+        auto settings = store.settings(); settings["core"] = testCore(); store.setSettings(settings);
+        QProcess process; process.start(serviceExecutable(), {"--validate-store", dir.path()});
+        QVERIFY(process.waitForStarted());
+        QCOMPARE(process.write("{\"padding\":\""), qint64(12)); QVERIFY(process.waitForBytesWritten());
+        QTest::qWait(100); QCOMPARE(process.state(), QProcess::Running);
+        process.write(QByteArray(1024 * 1024, 'x') + "\"}"); process.closeWriteChannel();
+        QVERIFY(process.waitForFinished(120000));
+        QVERIFY2(process.exitCode() == 0, process.readAllStandardError().constData());
+        QVERIFY(QJsonDocument::fromJson(process.readAllStandardOutput()).object()["valid"].toBool());
+        QProcess invalid; invalid.start(serviceExecutable(), {"--validate-store", dir.path()});
+        QVERIFY(invalid.waitForStarted()); invalid.write("{"); invalid.closeWriteChannel();
+        QVERIFY(invalid.waitForFinished());
+        QCOMPARE(QString::fromUtf8(invalid.readAllStandardError()).trimmed(), QStringLiteral("配置请求无效"));
     }
     void completeCandidateValidationBeforeCommit()
     {

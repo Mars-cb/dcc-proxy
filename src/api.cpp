@@ -312,7 +312,7 @@ void fetchSubscription(const QUrl &url, const QJsonObject &options, int proxyPor
                 const auto reason = status ? QObject::tr("%1（HTTP %2）：%3").arg(routeName).arg(status).arg(subscriptionFailureDetail(reply, status)) :
                     QObject::tr("%1（未收到 HTTP 响应）：%2").arg(routeName, subscriptionFailureDetail(reply, status));
                 if (!failures->contains(reason)) failures->append(reason);
-                if (status == 403 && automaticUserAgent && !compatibleAgent) { (*retained)(url, route, 0, true); return; }
+                if ((status == 403 || status == 404) && automaticUserAgent && !compatibleAgent) { (*retained)(url, route, 0, true); return; }
                 if (options["proxyFallback"].toBool(true)) {
                     if (route == Direct && proxyPort > 0) { (*retained)(url, LocalProxy, 0, compatibleAgent); return; }
                     if (route != SystemProxy) {
